@@ -2,8 +2,12 @@
   "name": "@sunchak/api",
   "version": "0.0.1",
   "private": true,
-  "description": "Sunchak 선착순 예매 서비스 백엔드 (NestJS 예정 · 현재 Prisma 스키마 단계)",
+  "description": "Sunchak 선착순 예매 서비스 백엔드 (NestJS + Prisma)",
   "scripts": {
+    "build": "nest build",
+    "start": "nest start",
+    "start:dev": "nest start --watch",
+    "start:prod": "node dist/main",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:studio": "prisma studio",
@@ -11,9 +15,21 @@
     "prisma:format": "prisma format"
   },
   "dependencies": {
-    "@prisma/client": "^6.11.1"
+    "@nestjs/common": "^11.0.0",
+    "@nestjs/config": "^4.0.0",
+    "@nestjs/core": "^11.0.0",
+    "@nestjs/platform-express": "^11.0.0",
+    "@prisma/client": "^6.11.1",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1"
   },
   "devDependencies": {
-    "prisma": "^6.11.1"
+    "@nestjs/cli": "^11.0.0",
+    "@nestjs/schematics": "^11.0.0",
+    "@types/node": "^22.10.0",
+    "prisma": "^6.11.1",
+    "ts-node": "^10.9.2",
+    "tsconfig-paths": "^4.2.0",
+    "typescript": "^5.7.0"
   }
 }
