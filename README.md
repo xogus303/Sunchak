@@ -21,7 +21,8 @@ ticketo/
 ├── docs/           기획·설계·이력 문서
 │   ├── 01_기술_로드맵.md
 │   ├── 02_서비스_기획안.md
-│   └── DEVLOG.md          개발 이력(작업 로그)
+│   ├── DEVLOG.md          개발 이력(작업 로그)
+│   └── decisions/         의사결정 기록(ADR) — 모든 선택의 대안·근거
 ├── apps/
 │   ├── api/        NestJS 백엔드 (예정)
 │   └── web/        Next.js 프론트엔드 (예정)
