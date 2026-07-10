@@ -47,3 +47,4 @@
 | [0006](./0006-realtime-sse.md) | 실시간 전송: SSE | Accepted |
 | [0007](./0007-monorepo.md) | 저장소 구조: 모노레포 | Accepted |
 | [0008](./0008-frontend-nextjs.md) | 프론트엔드: Next.js | Accepted |
+| [0009](./0009-db-schema-design.md) | 초기 DB 스키마 설계 | Accepted |
