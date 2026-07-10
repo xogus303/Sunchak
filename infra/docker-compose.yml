@@ -1,25 +1,25 @@
 services:
   postgres:
     image: postgres:16-alpine
-    container_name: ticketo-postgres
+    container_name: sunchak-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_USER: ticketo
-      POSTGRES_PASSWORD: ticketo
-      POSTGRES_DB: ticketo
+      POSTGRES_USER: sunchak
+      POSTGRES_PASSWORD: sunchak
+      POSTGRES_DB: sunchak
     ports:
       - "5432:5432"
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ticketo"]
+      test: ["CMD-SHELL", "pg_isready -U sunchak"]
       interval: 5s
       timeout: 5s
       retries: 5
 
   redis:
     image: redis:7-alpine
-    container_name: ticketo-redis
+    container_name: sunchak-redis
     restart: unless-stopped
     ports:
       - "6379:6379"
