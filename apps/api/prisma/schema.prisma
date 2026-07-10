@@ -1,0 +1,124 @@
+// Sunchak — 선착순 예매 서비스 데이터 모델
+// PRD(docs/02_서비스_기획안.md §7)의 ERD를 구현한다.
+// 설계 결정과 대안은 docs/decisions/0009-db-schema-design.md 참고.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────
+// Enums — 상태값은 DB 레벨에서 강제(오타/잘못된 값 차단)
+// ─────────────────────────────────────────────
+
+enum Role {
+  USER
+  ADMIN
+}
+
+enum EventStatus {
+  UPCOMING // 오픈 전 (카운트다운)
+  ON_SALE // 판매중
+  SOLD_OUT // 매진
+  CLOSED // 종료
+}
+
+enum ReservationStatus {
+  HELD // 좌석 홀드 중 (결제 대기, held_until 까지 유효)
+  CONFIRMED // 결제 성공 → 예매 확정
+  EXPIRED // 홀드 시간 초과로 자동 만료 (좌석 반환됨)
+  CANCELLED // 사용자/관리자 취소
+}
+
+enum PaymentStatus {
+  PENDING // 큐에서 비동기 처리 대기/진행중
+  PAID // 결제 성공
+  FAILED // 결제 실패
+}
+
+// ─────────────────────────────────────────────
+// Models
+// ─────────────────────────────────────────────
+
+model User {
+  id        Int      @id @default(autoincrement())
+  email     String   @unique // 로그인 식별자 → 유니크 인덱스 자동 생성
+  password  String // argon2 해시만 저장. 평문 금지.
+  role      Role     @default(USER)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  reservations Reservation[]
+
+  @@map("users")
+}
+
+model Event {
+  id          Int         @id @default(autoincrement())
+  title       String
+  description String?
+  price       Int // 원(KRW) 정수. 통화 최소단위로 저장 — Float 금지(부동소수 오차).
+  openAt      DateTime // 티켓 오픈 시각
+  status      EventStatus @default(UPCOMING)
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  // 재고는 별도 테이블로 분리 → 락 경합 범위를 좁힌다 (아래 Inventory 참고)
+  inventory    Inventory?
+  reservations Reservation[]
+
+  // 목록 조회: status로 필터하고 openAt으로 정렬하는 패턴을 커버
+  @@index([status, openAt])
+  @@map("events")
+}
+
+model Inventory {
+  id           Int      @id @default(autoincrement())
+  eventId      Int      @unique // Event 1 : 1 Inventory
+  totalQty     Int // 총 재고 (변하지 않음, 통계용)
+  remainingQty Int // ★ 동시성 핵심 컬럼 — 원자적 차감/락 대상
+  version      Int      @default(0) // ★ 낙관적 락(W2): UPDATE 시 version 일치 검사 후 +1
+  updatedAt    DateTime @updatedAt
+
+  event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@map("inventories")
+}
+
+model Reservation {
+  id        Int               @id @default(autoincrement())
+  userId    Int
+  eventId   Int
+  quantity  Int
+  status    ReservationStatus @default(HELD)
+  heldUntil DateTime? // HELD 상태에서만 의미 있음(홀드 만료 시각). 확정 후 null 가능.
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
+
+  user    User     @relation(fields: [userId], references: [id])
+  event   Event    @relation(fields: [eventId], references: [id])
+  payment Payment?
+
+  @@index([userId]) // "내 예매 내역" 조회
+  @@index([eventId, status]) // 관리자 판매 현황, 상태별 집계
+  @@index([status, heldUntil]) // 만료된 홀드 스윕(청소 워커)이 HELD + heldUntil<now 스캔
+  @@map("reservations")
+}
+
+model Payment {
+  id             Int           @id @default(autoincrement())
+  reservationId  Int           @unique // Reservation 1 : 1 Payment
+  amount         Int // 원(KRW) 정수
+  status         PaymentStatus @default(PENDING)
+  idempotencyKey String        @unique // ★ 멱등키 — 같은 키의 결제 요청 중복 방지(W3)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  reservation Reservation @relation(fields: [reservationId], references: [id])
+
+  @@map("payments")
+}
