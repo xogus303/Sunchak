@@ -35,7 +35,7 @@
 - 모든 작업은 회사/집 두 기기에서 동일하게 재현·공유돼야 한다.
 - 코드·DB 구조·마이그레이션은 git으로 공유(집에서 clone + `prisma migrate`로 동일 재현).
 - DB 데이터는 클라우드 공유 DB(**Neon**, ADR 0010). Redis는 로컬(휘발성).
-- 비밀값(연결 문자열·토큰)은 **절대 커밋 금지**(.env gitignore), 기기별 `.env` 주입. 새 키는 `.env.example`에 값 없이 반영.
+- 비밀값(연결 문자열·토큰)은 **절대 커밋 금지**(.env gitignore). **Infisical**(ADR 0011)에 저장하고 `infisical run`으로 주입. 새 키는 Infisical에 추가 + `.env.example`에 값 없이 반영.
 - W2 부하테스트는 로컬 Postgres로 분리(`DATABASE_URL`만 교체).
 
 ### 새 세션에서 이어가기

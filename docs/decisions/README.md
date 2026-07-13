@@ -49,3 +49,4 @@
 | [0008](./0008-frontend-nextjs.md) | 프론트엔드: Next.js | Accepted |
 | [0009](./0009-db-schema-design.md) | 초기 DB 스키마 설계 | Accepted |
 | [0010](./0010-db-hosting-neon.md) | 개발 DB 호스팅: Neon 공유 + Redis 로컬 | Accepted |
+| [0011](./0011-secrets-infisical.md) | 비밀값 관리: Infisical | Accepted |
