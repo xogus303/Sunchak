@@ -74,3 +74,18 @@
 - **명령 변경**: `npm install`→`pnpm install`, `npx prisma ...`→`pnpm exec prisma ...`. 마이그레이션은 `infisical run --env=dev -- pnpm exec prisma migrate dev --name init`.
 - **비고**: Infisical CLI는 brew의 Command Line Tools 구버전 이슈로 `npm i -g @infisical/cli`(npm 전역)로 설치. `infisical init`으로 apps/api 연결(.infisical.json — 비밀값 없음, 커밋 가능).
 - **다음**: pnpm 전환 후 첫 마이그레이션 실행 → 생성된 migration.sql 리뷰.
+
+## 2026-07-14 · W1 — 인증(회원가입/로그인/보호가드) + 이벤트 CRUD
+
+- **첫 마이그레이션 성공**: `infisical run --env=dev -- pnpm exec prisma migrate dev --name init` → Neon에 테이블 5 + enum/인덱스/FK 생성. 서버 기동 + `/health` 200 확인.
+- **인증 구현 (→ ADR 0013)**:
+  - `POST /auth/signup` — DTO(class-validator) 검증 + argon2 해싱 + 유저 생성, 비번 해시 응답 제외. 전역 ValidationPipe.
+  - `POST /auth/login` — `argon2.verify`(재해싱 비교) 후 JWT 발급. 실패는 401 동일 메시지.
+  - 보호 가드 — passport-jwt Strategy + `JwtAuthGuard` + `@CurrentUser`. `GET /auth/me`.
+- **이벤트 CRUD**: `GET /events`(공개 목록)·`GET /events/:id`(공개 상세, 404)·`POST /events`(관리자만). `RolesGuard`+`@Roles(Role.ADMIN)`, 두 가드 순서(JWT→Roles), Prisma 중첩 생성으로 Event+Inventory 동시 생성, `ParseIntPipe`.
+- **삽질/메모**:
+  - pnpm11은 build script 기본 차단 → `pnpm-workspace.yaml`의 `allowBuilds`로 prisma·argon2 허용(package.json `pnpm` 필드는 pnpm11에서 무시됨).
+  - `@nestjs/jwt`의 `expiresIn`이 ms의 엄격한 타입 요구 → `config.get`(제네릭 없이)로 회피.
+  - JWT payload는 암호화가 아니라 인코딩(누구나 디코딩) → 민감정보 금지. role 변경 시 **재로그인** 필요(토큰에 role이 스냅샷됨).
+- **학습 규칙 강화**: "코드 자체(각 줄·문법)도 설명" 규칙을 CLAUDE.md/지침에 추가.
+- **다음(W1 마무리 → W2)**: auth/events 단위 테스트(Jest) → 동시성 실험(순진한 구현 → 초과판매 재현 → 락 3종+Redis) + k6.
