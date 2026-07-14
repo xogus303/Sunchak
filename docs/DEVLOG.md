@@ -89,3 +89,17 @@
   - JWT payload는 암호화가 아니라 인코딩(누구나 디코딩) → 민감정보 금지. role 변경 시 **재로그인** 필요(토큰에 role이 스냅샷됨).
 - **학습 규칙 강화**: "코드 자체(각 줄·문법)도 설명" 규칙을 CLAUDE.md/지침에 추가.
 - **다음(W1 마무리 → W2)**: auth/events 단위 테스트(Jest) → 동시성 실험(순진한 구현 → 초과판매 재현 → 락 3종+Redis) + k6.
+
+## 2026-07-14 · W1 마무리 — Jest 단위 테스트 셋업 + auth/events 테스트
+
+- **테스트 대상 선정 원칙(학습)**: "분기(`if`/`throw`) 수 ≈ 테스트 수". 우리가 쓴 판단 로직만 테스트하고, DB(Prisma)·argon2·JWT 같은 남의 코드는 mock으로 잘라낸다.
+- **작성한 테스트(8개, 전부 통과)**:
+  - `auth.service.spec.ts` — login(없는 이메일 401 / 비번 틀림 401 / 성공 시 accessToken+payload), signup(중복 409 / 응답에 password 미포함).
+  - `events.service.spec.ts` — findOne(없으면 404 / 있으면 반환), create(재고 `remainingQty === totalQty` 초기화 검증, `expect.objectContaining`으로 관심 필드만 좁게).
+- **mock 두 방식 정리(학습)**: 코드가 의존성을 "어떻게 손에 넣느냐"가 방식을 결정. 생성자 주입 → NestJS DI에 `useValue`로 교체(인스턴스 교체), 직접 `import` → `jest.mock`으로 모듈 로더 가로채기(모듈 교체). Jest가 sandbox의 모듈 로더를 소유하기에 `jest.mock`이 가능(hoisting으로 import보다 먼저 등록).
+- **삽질 3종**:
+  1. `pnpm install`이 Node v22.13+ 요구인데 v22.12.0 → nvm으로 v22.23.1 설치, `nvm alias default`, 루트에 `.nvmrc`(22.23.1) 추가해 두 기기 고정.
+  2. `pnpm test`가 테스트 전 의존성 검사에서 실패 — `pnpm-workspace.yaml`의 `unrs-resolver`가 placeholder 문자열이라 boolean 요구를 위반. `false`로 명시(네이티브 가속기, 테스트 불필요).
+  3. `@nestjs/testing` 미설치로 `Test.createTestingModule` import 실패 → devDep 추가.
+- **추가 설치**: `jest`·`ts-jest`·`@types/jest`·`@nestjs/testing`(devDep), package.json에 jest 설정(`rootDir: src`, `testRegex: *.spec.ts`, `transform: ts-jest`, `testEnvironment: node`) + `test`/`test:watch`/`test:cov` 스크립트.
+- **다음(W2)**: 동시성 실험 — 순진한 예매 구현 → 초과판매(oversell) 재현 → 락 3종 + Redis 비교 + k6 부하테스트.

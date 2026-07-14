@@ -3,3 +3,4 @@ allowBuilds:
   '@prisma/engines': true
   prisma: true
   argon2: true
+  unrs-resolver: false

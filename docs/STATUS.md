@@ -5,7 +5,7 @@
 > - **세션 시작 시**: 이 파일을 가장 먼저 읽고 "다음 할 일"부터 이어간다.
 > - **세션 끝 / 커밋 전**: 이 파일을 **덮어써서** 최신 상태로 갱신한다. (시간순 이력·삽질은 `DEVLOG.md`, 결정 근거는 `decisions/`)
 
-**마지막 업데이트:** 2026-07-14 · 회사 기기
+**마지막 업데이트:** 2026-07-14 · 회사 기기 (W1 마무리 — 테스트 완료)
 
 ---
 
@@ -21,15 +21,17 @@
 - **로그인**: `POST /auth/login` — `argon2.verify`로 비번 대조 후 JWT 발급(@nestjs/jwt, `JwtModule.registerAsync`로 JWT_SECRET/EXPIRES_IN 주입). 실패는 401 동일 메시지.
 - **보호 가드**: passport-jwt Strategy + `JwtAuthGuard` + `@CurrentUser` 데코레이터. `GET /auth/me`(유효 토큰 필요, 없으면 401).
 - **이벤트 CRUD**: `GET /events`(공개 목록), `GET /events/:id`(공개 상세, 없으면 404), `POST /events`(관리자만). 생성 시 Inventory 중첩 생성. `RolesGuard`+`@Roles(Role.ADMIN)`+`ParseIntPipe` 도입. tsc 통과.
+- **단위 테스트(W1 마무리)**: `auth.service.spec.ts`(5) + `events.service.spec.ts`(3), **총 8개 전부 통과**. Jest+ts-jest 셋업 완료(`pnpm test`). mock은 주입 의존성=`useValue`, 직접 import=`jest.mock`.
+- **런타임 고정**: Node **v22.23.1**로 버전업(pnpm11이 v22.13+ 요구). nvm default 지정 + 루트 `.nvmrc`로 두 기기 동일.
 
 ## 🔨 진행 중 / 막힌 것
 - (없음). 참고: 관리자 라우트 테스트하려면 DB에서 유저 role을 ADMIN으로 바꾸고 **재로그인**(토큰에 role이 박히므로).
 
 ## ▶️ 다음 할 일 (이 순서로)
-1. **테스트**: auth/events 서비스 단위 테스트(Jest, 한글 describe/it).
-2. **W1 마무리 → W2**: 동시성 실험(순진한 구현 → 초과판매 재현 → 락 3종 + Redis) + k6.
+1. **W2 동시성 실험**: 순진한 예매 구현 → 초과판매(oversell) 재현 → 락 3종(비관/낙관/DB) + Redis 비교 → k6 부하테스트. before/after 성능 문서화(§8).
 
 > Infisical Development에 `JWT_SECRET`, `JWT_EXPIRES_IN`(=1h) 추가 완료.
+> 집 기기에서 이어받을 때: `nvm use`(=.nvmrc의 22.23.1) → `corepack pnpm install` → `corepack pnpm test`.
 
 ## 🖥️ 다른 기기에서 이어받는 법
 1. `git pull`
