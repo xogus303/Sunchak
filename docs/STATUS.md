@@ -17,15 +17,17 @@
 - **pnpm 전환 완료**: corepack로 pnpm@11 고정, `pnpm-lock.yaml`, `pnpm-workspace.yaml`의 `allowBuilds`로 prisma 빌드 허용.
 - **첫 마이그레이션 적용**: `20260714002709_init` — Neon에 테이블 5 + enum 4 + 인덱스/FK 생성.
 - **서버 기동 확인**: `/health` 200 응답 확인 완료.
-- **회원가입**: `POST /auth/signup` — DTO 검증(class-validator) + argon2 해싱 + 유저 생성, 비번 해시는 응답 제외 (→ ADR 0013). 전역 ValidationPipe 적용. tsc 통과.
+- **회원가입**: `POST /auth/signup` — DTO 검증 + argon2 해싱 + 유저 생성, 비번 해시 응답 제외 (→ ADR 0013). 전역 ValidationPipe.
+- **로그인**: `POST /auth/login` — `argon2.verify`로 비번 대조 후 JWT 발급(@nestjs/jwt, `JwtModule.registerAsync`로 JWT_SECRET/EXPIRES_IN 주입). 실패는 401 동일 메시지. tsc 통과.
 
 ## 🔨 진행 중 / 막힌 것
 - (없음)
 
 ## ▶️ 다음 할 일 (이 순서로)
-1. **로그인**: `POST /auth/login` — 비번 검증 후 JWT 발급(@nestjs/jwt).
-2. **보호 가드**: JWT 있어야 접근되는 라우트(passport-jwt Strategy + Guard).
-3. **이벤트 CRUD**: 관리자만 생성. 서비스 테스트(Jest, 한글 describe/it).
+1. **보호 가드**: passport-jwt Strategy + `JwtAuthGuard` → `GET /auth/me`로 "토큰 있어야 접근" 검증.
+2. **이벤트 CRUD**: 관리자(role=ADMIN)만 생성. 서비스 테스트(Jest, 한글 describe/it).
+
+> Infisical Development에 `JWT_SECRET`, `JWT_EXPIRES_IN`(=1h) 추가 완료.
 
 ## 🖥️ 다른 기기에서 이어받는 법
 1. `git pull`
