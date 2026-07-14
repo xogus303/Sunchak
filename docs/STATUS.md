@@ -18,14 +18,15 @@
 - **첫 마이그레이션 적용**: `20260714002709_init` — Neon에 테이블 5 + enum 4 + 인덱스/FK 생성.
 - **서버 기동 확인**: `/health` 200 응답 확인 완료.
 - **회원가입**: `POST /auth/signup` — DTO 검증 + argon2 해싱 + 유저 생성, 비번 해시 응답 제외 (→ ADR 0013). 전역 ValidationPipe.
-- **로그인**: `POST /auth/login` — `argon2.verify`로 비번 대조 후 JWT 발급(@nestjs/jwt, `JwtModule.registerAsync`로 JWT_SECRET/EXPIRES_IN 주입). 실패는 401 동일 메시지. tsc 통과.
+- **로그인**: `POST /auth/login` — `argon2.verify`로 비번 대조 후 JWT 발급(@nestjs/jwt, `JwtModule.registerAsync`로 JWT_SECRET/EXPIRES_IN 주입). 실패는 401 동일 메시지.
+- **보호 가드**: passport-jwt Strategy + `JwtAuthGuard` + `@CurrentUser` 데코레이터. `GET /auth/me`(유효 토큰 필요, 없으면 401) 구현. tsc 통과.
 
 ## 🔨 진행 중 / 막힌 것
 - (없음)
 
 ## ▶️ 다음 할 일 (이 순서로)
-1. **보호 가드**: passport-jwt Strategy + `JwtAuthGuard` → `GET /auth/me`로 "토큰 있어야 접근" 검증.
-2. **이벤트 CRUD**: 관리자(role=ADMIN)만 생성. 서비스 테스트(Jest, 한글 describe/it).
+1. **이벤트 CRUD**: 목록/상세는 공개, 생성/수정/삭제는 관리자(role=ADMIN)만 — 역할 가드(RolesGuard).
+2. **테스트**: auth 서비스 단위 테스트(Jest, 한글 describe/it).
 
 > Infisical Development에 `JWT_SECRET`, `JWT_EXPIRES_IN`(=1h) 추가 완료.
 
