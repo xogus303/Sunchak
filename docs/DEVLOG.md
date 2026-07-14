@@ -66,3 +66,11 @@
 - **역할 분리**: `STATUS.md`(현재 스냅샷) / `DEVLOG.md`(시간순 이력·삽질) / `decisions/`(결정 근거).
 - **반영**: CLAUDE.md §9, PROJECT_INSTRUCTIONS "기기 간 재현성"·"새 세션에서 이어가기" 갱신.
 - **다음**: Neon 연결 문자열 확보 → Infisical 가입/프로젝트 생성 → CLI 설치·로그인 → `infisical run -- npx prisma migrate dev --name init`로 첫 마이그레이션.
+
+## 2026-07-14 · 패키지 매니저 pnpm 채택 (ADR 0012)
+
+- **결정**: 모노레포·재현성 위해 **pnpm** + corepack 버전 고정. npm/yarn 대비 빠르고 디스크 절약, 엄격한 의존성.
+- **전환**: `apps/api`에서 `corepack use pnpm@latest`로 버전 고정, `package-lock.json` 제거 → `pnpm-lock.yaml` 생성.
+- **명령 변경**: `npm install`→`pnpm install`, `npx prisma ...`→`pnpm exec prisma ...`. 마이그레이션은 `infisical run --env=dev -- pnpm exec prisma migrate dev --name init`.
+- **비고**: Infisical CLI는 brew의 Command Line Tools 구버전 이슈로 `npm i -g @infisical/cli`(npm 전역)로 설치. `infisical init`으로 apps/api 연결(.infisical.json — 비밀값 없음, 커밋 가능).
+- **다음**: pnpm 전환 후 첫 마이그레이션 실행 → 생성된 migration.sql 리뷰.

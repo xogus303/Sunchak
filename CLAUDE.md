@@ -91,6 +91,7 @@
 - **세션 인수인계 (`docs/STATUS.md`)**: "지금 어디까지 됐고 다음은 뭔가"를 담는 항상 최신인 스냅샷 1장이다. 계속 쌓지 않고 **덮어써서** 유지한다.
   - **세션 시작 시**: `docs/STATUS.md`를 **가장 먼저 읽고** "다음 할 일"부터 이어간다.
   - **세션 끝 / 커밋 전**: `docs/STATUS.md`를 **최신 상태로 덮어쓴다**. (역할 분리 — 시간순 이력·삽질은 `DEVLOG.md`, 결정 근거는 `decisions/`, 현재 상태 스냅샷은 `STATUS.md`.)
+- **패키지 매니저는 pnpm**(ADR 0012). corepack로 `package.json`의 `packageManager`에 버전을 고정해 두 기기 동일. `npm`/`yarn` 명령 혼용 금지. 예: `pnpm install`, `pnpm exec prisma ...`, `infisical run -- pnpm ...`.
 - **코드·DB 구조·마이그레이션**은 git으로 공유한다(집에서 `clone` + `prisma migrate`로 동일 재현).
 - **DB 데이터**는 클라우드 공유 DB(**Neon**, ADR 0010)를 쓴다. **Redis는 로컬**(휘발성이라 공유 불필요).
 - **비밀값(연결 문자열·토큰)은 절대 커밋 금지**(.env는 gitignore). 비밀값은 **Infisical**(ADR 0011)에 저장하고 `infisical run -- <명령>`으로 주입한다(평문 `.env` 지양). 새 env 키가 생기면 Infisical에 추가하고 `.env.example`에 **값 없이** 키만 반영(§4).
