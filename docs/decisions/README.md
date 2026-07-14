@@ -51,3 +51,4 @@
 | [0010](./0010-db-hosting-neon.md) | 개발 DB 호스팅: Neon 공유 + Redis 로컬 | Accepted |
 | [0011](./0011-secrets-infisical.md) | 비밀값 관리: Infisical | Accepted |
 | [0012](./0012-package-manager-pnpm.md) | 패키지 매니저: pnpm (corepack) | Accepted |
+| [0013](./0013-auth-approach.md) | 인증: argon2 해싱 + JWT + DTO 검증 | Accepted |

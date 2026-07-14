@@ -15,15 +15,17 @@
 - **인프라 결정**: Neon 클라우드 Postgres 프로젝트 `sunchak` 생성(싱가포르, PG18) (→ ADR 0010). 비밀값은 Infisical로 관리 (→ ADR 0011). 패키지 매니저 pnpm(corepack) (→ ADR 0012).
 - **Infisical 연결**: `apps/api`에 `infisical init` 완료(`.infisical.json`). Development 환경에 `DATABASE_URL`/`PORT`/`REDIS_URL` 저장. CLI는 `npm i -g @infisical/cli`로 설치.
 - **pnpm 전환 완료**: corepack로 pnpm@11 고정, `pnpm-lock.yaml`, `pnpm-workspace.yaml`의 `allowBuilds`로 prisma 빌드 허용.
-- **첫 마이그레이션 적용**: `20260714002709_init` — Neon에 테이블 5(users/events/inventories/reservations/payments) + enum 4 + 인덱스/FK 생성. `infisical run --env=dev -- pnpm exec prisma migrate dev`로 실행.
+- **첫 마이그레이션 적용**: `20260714002709_init` — Neon에 테이블 5 + enum 4 + 인덱스/FK 생성.
+- **서버 기동 확인**: `/health` 200 응답 확인 완료.
+- **회원가입**: `POST /auth/signup` — DTO 검증(class-validator) + argon2 해싱 + 유저 생성, 비번 해시는 응답 제외 (→ ADR 0013). 전역 ValidationPipe 적용. tsc 통과.
 
 ## 🔨 진행 중 / 막힌 것
 - (없음)
 
 ## ▶️ 다음 할 일 (이 순서로)
-1. **서버 기동 확인**: `infisical run --env=dev -- pnpm run start:dev` → `curl localhost:3001/health` 200 확인.
-2. **JWT 인증** (argon2 해싱) + **이벤트 CRUD** 엔드포인트 + 서비스 테스트(Jest, 한글 describe/it).
-   - argon2는 네이티브 빌드 필요 → 설치 후 `pnpm-workspace.yaml`의 `allowBuilds`에 `argon2: true` 추가.
+1. **로그인**: `POST /auth/login` — 비번 검증 후 JWT 발급(@nestjs/jwt).
+2. **보호 가드**: JWT 있어야 접근되는 라우트(passport-jwt Strategy + Guard).
+3. **이벤트 CRUD**: 관리자만 생성. 서비스 테스트(Jest, 한글 describe/it).
 
 ## 🖥️ 다른 기기에서 이어받는 법
 1. `git pull`
