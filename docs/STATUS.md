@@ -19,14 +19,15 @@
 - **서버 기동 확인**: `/health` 200 응답 확인 완료.
 - **회원가입**: `POST /auth/signup` — DTO 검증 + argon2 해싱 + 유저 생성, 비번 해시 응답 제외 (→ ADR 0013). 전역 ValidationPipe.
 - **로그인**: `POST /auth/login` — `argon2.verify`로 비번 대조 후 JWT 발급(@nestjs/jwt, `JwtModule.registerAsync`로 JWT_SECRET/EXPIRES_IN 주입). 실패는 401 동일 메시지.
-- **보호 가드**: passport-jwt Strategy + `JwtAuthGuard` + `@CurrentUser` 데코레이터. `GET /auth/me`(유효 토큰 필요, 없으면 401) 구현. tsc 통과.
+- **보호 가드**: passport-jwt Strategy + `JwtAuthGuard` + `@CurrentUser` 데코레이터. `GET /auth/me`(유효 토큰 필요, 없으면 401).
+- **이벤트 CRUD**: `GET /events`(공개 목록), `GET /events/:id`(공개 상세, 없으면 404), `POST /events`(관리자만). 생성 시 Inventory 중첩 생성. `RolesGuard`+`@Roles(Role.ADMIN)`+`ParseIntPipe` 도입. tsc 통과.
 
 ## 🔨 진행 중 / 막힌 것
-- (없음)
+- (없음). 참고: 관리자 라우트 테스트하려면 DB에서 유저 role을 ADMIN으로 바꾸고 **재로그인**(토큰에 role이 박히므로).
 
 ## ▶️ 다음 할 일 (이 순서로)
-1. **이벤트 CRUD**: 목록/상세는 공개, 생성/수정/삭제는 관리자(role=ADMIN)만 — 역할 가드(RolesGuard).
-2. **테스트**: auth 서비스 단위 테스트(Jest, 한글 describe/it).
+1. **테스트**: auth/events 서비스 단위 테스트(Jest, 한글 describe/it).
+2. **W1 마무리 → W2**: 동시성 실험(순진한 구현 → 초과판매 재현 → 락 3종 + Redis) + k6.
 
 > Infisical Development에 `JWT_SECRET`, `JWT_EXPIRES_IN`(=1h) 추가 완료.
 
