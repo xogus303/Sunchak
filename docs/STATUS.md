@@ -5,7 +5,7 @@
 > - **세션 시작 시**: 이 파일을 가장 먼저 읽고 "다음 할 일"부터 이어간다.
 > - **세션 끝 / 커밋 전**: 이 파일을 **덮어써서** 최신 상태로 갱신한다. (시간순 이력·삽질은 `DEVLOG.md`, 결정 근거는 `decisions/`)
 
-**마지막 업데이트:** 2026-07-16 · 집 기기 (W2 — 비관/낙관 락 2종 완료, 다음은 DB 원자연산)
+**마지막 업데이트:** 2026-07-16 · 집 기기 (W2 — 락 3종 전부 완료, 다음은 k6 부하 비교)
 
 ---
 
@@ -15,17 +15,24 @@
 - **순진한 예매 API**: `reservations` 모듈 — `POST /events/:eventId/reservations`(JWT 필요). ①읽기 →②확인 →③절대값 덮어쓰기 차감 →④예매기록. 단일 요청 재고 5→4 정상 확인.
 - **초과판매(oversell) 재현**: 재고 1개에 동시 30개 → 전부 201, **예매 30건/초과판매 29건**. 재고는 lost update로 `-29`가 아닌 `0`(더 은밀). 재현 스크립트는 scratchpad, 지연은 ②③사이 `setTimeout(50ms)`(학습용).
 - **비관적 락(락 3종 중 1번)**: `$transaction` + `SELECT … FOR UPDATE`. 재고 행 잠금·직렬화. (git 63d0e79에 보존.)
-- **낙관적 락(락 3종 중 2번)**: 재시도 루프 + `updateMany({where:{id,version}})` compare-and-swap. 락 없이 충돌 감지·재시도. **현재 create()에 반영된 버전.** 동일 조건에서 **1건 성공·초과판매 0** 확인.
+- **낙관적 락(락 3종 중 2번)**: 재시도 루프 + `updateMany({where:{id,version}})` compare-and-swap. 락 없이 충돌 감지·재시도. (git 46a9a60에 보존.)
+- **DB 원자연산(락 3종 중 3번)**: `updateMany({ where:{ eventId, remainingQty:{ gte } }, data:{ remainingQty:{ decrement } } })` 단일 문장. **현재 create()에 반영된 버전.** 재고 1→1건·재고 5→5건 정확 검증(초과판매 0, 지연 없이).
 
 ## 🔨 진행 중 / 막힌 것
-- (없음). 참고: `reservations.service.ts`의 `setTimeout(50ms)`는 재현용 지연 — 락 3종 비교 끝나면 제거 예정.
+- (없음). 참고: 재현용 `setTimeout(50ms)`는 원자연산 버전엔 이미 없음(비관/낙관 버전은 git 히스토리에 지연 포함 상태로 보존).
 - 장시간 테스트 시 JWT(1h) 만료 주의 → 재로그인으로 토큰 갱신.
 
 ## ▶️ 다음 할 일 (이 순서로)
-1. ✅ ~~비관적 락~~ / ✅ ~~낙관적 락~~ — 둘 다 초과판매 0 검증 완료.
-2. **DB 원자연산(락 3종 중 3번)** — `updateMany({ where:{ eventId, remainingQty:{ gte:quantity } }, data:{ remainingQty:{ decrement:quantity } } })` 조건부 단일 UPDATE. count===0이면 매진. 가장 단순.
-3. **k6 부하테스트** — 세 방식(+순진한) 처리량/지연 before/after 수치 비교, `docs/`에 문서화(§8). 이후 Redis 접근.
-4. 비교 끝나면 재현용 `setTimeout(50ms)` 제거.
+1. ✅ ~~락 3종(비관/낙관/원자연산)~~ — 전부 초과판매 0 검증 완료.
+2. **k6 부하테스트(§8)** — 순진한/비관/낙관/원자연산 4방식의 처리량(RPS)·지연(p95)·초과판매 여부를 부하 하에 비교, `docs/`에 before/after 문서화.
+   - **선결정 필요**: 4방식을 런타임에 고를 방법(예: `?strategy=` 쿼리 or 4개 메서드 분리). 현재는 create() 하나에 원자연산만 반영, 나머지는 git에만 존재.
+3. **Redis** 기반 접근(재고 카운터를 Redis에서 원자 차감) 추가 후 동일 부하 비교.
+4. 필요 시 비관/낙관 버전의 재현용 지연 제거·정리.
+
+## 🧪 W2 재현/검증 스크립트 (scratchpad, git 미포함)
+- `oversell.sh` — 재고 1·동시 30 고정.
+- `oversell_n.sh <재고> <동시수>` — 파라미터화(예: `oversell_n.sh 5 30`).
+- 사전조건: 로컬 서버 기동 + `/tmp/token.txt`에 유효 토큰(admin 로그인).
 
 ## 🖥️ 다른 기기에서 이어받는 법 (W2는 로컬 DB!)
 1. `git pull`
