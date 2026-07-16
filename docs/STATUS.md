@@ -5,7 +5,7 @@
 > - **세션 시작 시**: 이 파일을 가장 먼저 읽고 "다음 할 일"부터 이어간다.
 > - **세션 끝 / 커밋 전**: 이 파일을 **덮어써서** 최신 상태로 갱신한다. (시간순 이력·삽질은 `DEVLOG.md`, 결정 근거는 `decisions/`)
 
-**마지막 업데이트:** 2026-07-16 · 집 기기 (W2 — 4전략 런타임 선택 리팩터 완료, 다음은 k6 계측)
+**마지막 업데이트:** 2026-07-16 · 집 기기 (W2 — k6 4전략 비교 완료, 다음은 Redis)
 
 ---
 
@@ -17,15 +17,20 @@
 - **비관적 락(락 3종 중 1번)**: `$transaction` + `SELECT … FOR UPDATE`. 재고 행 잠금·직렬화. (git 63d0e79에 보존.)
 - **낙관적 락(락 3종 중 2번)**: 재시도 루프 + `updateMany({where:{id,version}})` compare-and-swap. 락 없이 충돌 감지·재시도. (git 46a9a60에 보존.)
 - **DB 원자연산(락 3종 중 3번)**: `updateMany({ where:{ eventId, remainingQty:{ gte } }, data:{ remainingQty:{ decrement } } })` 단일 문장. 재고 1→1건·재고 5→5건 정확 검증.
-- **4전략 런타임 선택 리팩터**: `create()`가 `?strategy=naive|pessimistic|optimistic|atomic`로 4개 메서드에 분기(생략 시 atomic). 재현용 지연은 전 전략에서 제거. **4방식 모두 현재 코드에 공존.** 검증: naive 오버셀(4/1), 나머지 정확(1/1).
+- **4전략 런타임 선택 리팩터**: `create()`가 `?strategy=naive|pessimistic|optimistic|atomic`로 분기(생략 시 atomic). 4방식 모두 현재 코드에 공존.
+- **k6 4전략 부하 비교(§8)**: VU30·15s·재고20만·hot row. **atomic이 승자**(RPS 2030·정확), naive는 lost update 3.5만, optimistic은 재시도 thrashing으로 8,503 실패, pessimistic은 정확하나 느림. 문서: `docs/perf/2026-07-16-w2-lock-comparison.md`. 스크립트: `apps/api/test/load/`.
 
 ## 🔨 진행 중 / 막힌 것
 - (없음). 장시간 테스트 시 JWT(1h) 만료 주의 → 재로그인으로 토큰 갱신.
 
 ## ▶️ 다음 할 일 (이 순서로)
-1. ✅ ~~락 3종~~ / ✅ ~~4전략 런타임 선택 리팩터~~ — 완료.
-2. **k6 부하테스트(§8)** — k6 설치 → 스크립트 작성 → 4전략 동일 부하로 RPS·p95·초과판매 여부 계측 → `docs/`에 before/after. (전환은 `?strategy=`로.)
-3. **Redis** 기반 접근(재고 카운터를 Redis에서 원자 차감) 추가 후 동일 부하 비교.
+1. ✅ ~~락 3종~~ / ✅ ~~4전략 리팩터~~ / ✅ ~~k6 4전략 비교~~ — 완료.
+2. **Redis 원자 차감** — 재고 카운터를 Redis(`DECR` 또는 Lua)에서 원자적으로 깎는 5번째 전략 추가 → 동일 k6 프리셋으로 DB atomic과 처리량 비교. (Redis는 로컬, docker-compose에 이미 정의됨.)
+3. (선택) 회차 평균·VU 스윕(10/50/100)으로 벤치 정밀화.
+
+## 🧪 W2 벤치 실행법
+- 서버(`pnpm start:dev`)+로컬 PG 기동, admin 계정 존재 확인 후:
+  `ADMIN_PASSWORD=... bash apps/api/test/load/bench.sh` (VUS/DUR/STOCK 환경변수로 조절).
 
 ## 🧪 W2 재현/검증 스크립트 (scratchpad, git 미포함)
 - `oversell.sh` — 재고 1·동시 30 고정.
