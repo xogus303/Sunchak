@@ -5,7 +5,7 @@
 > - **세션 시작 시**: 이 파일을 가장 먼저 읽고 "다음 할 일"부터 이어간다.
 > - **세션 끝 / 커밋 전**: 이 파일을 **덮어써서** 최신 상태로 갱신한다. (시간순 이력·삽질은 `DEVLOG.md`, 결정 근거는 `decisions/`)
 
-**마지막 업데이트:** 2026-07-16 · 집 기기 (W2 — k6 4전략 비교 완료, 다음은 Redis)
+**마지막 업데이트:** 2026-07-16 · 집 기기 (W2 — Redis 원자 차감까지 완료 = 5전략 비교 끝, W2 마무리)
 
 ---
 
@@ -18,15 +18,17 @@
 - **낙관적 락(락 3종 중 2번)**: 재시도 루프 + `updateMany({where:{id,version}})` compare-and-swap. 락 없이 충돌 감지·재시도. (git 46a9a60에 보존.)
 - **DB 원자연산(락 3종 중 3번)**: `updateMany({ where:{ eventId, remainingQty:{ gte } }, data:{ remainingQty:{ decrement } } })` 단일 문장. 재고 1→1건·재고 5→5건 정확 검증.
 - **4전략 런타임 선택 리팩터**: `create()`가 `?strategy=naive|pessimistic|optimistic|atomic`로 분기(생략 시 atomic). 4방식 모두 현재 코드에 공존.
-- **k6 4전략 부하 비교(§8)**: VU30·15s·재고20만·hot row. **atomic이 승자**(RPS 2030·정확), naive는 lost update 3.5만, optimistic은 재시도 thrashing으로 8,503 실패, pessimistic은 정확하나 느림. 문서: `docs/perf/2026-07-16-w2-lock-comparison.md`. 스크립트: `apps/api/test/load/`.
+- **Redis 인메모리 원자 차감(5번째 전략)**: `RedisService`(ioredis, `@Global`, Prisma와 같은 생명주기) + `createRedis` — `DECRBY` 후 음수면 `INCRBY` 보상+409, 아니면 `reservation.create`만 DB에. 재고 seed는 bench.sh가 `redis-cli SET`으로.
+- **k6 5전략 부하 비교(§8)**: VU30·15s·재고20만·hot row. **redis 압도적 승자**(RPS 9354·p95 4.4ms·완벽 정확 = atomic의 4.6배), atomic 2024(정확), naive lost update 3.3만, optimistic 재시도 8,262 실패, pessimistic 정확하나 느림. **교훈: 병목은 DB가 아니라 단일 재고 행 쓰기의 직렬화** — Redis로 빼면 DB는 병렬 INSERT만. 비용은 정합성(Redis↔DB). 문서: `docs/perf/2026-07-16-w2-lock-comparison.md`. 스크립트: `apps/api/test/load/`.
 
 ## 🔨 진행 중 / 막힌 것
 - (없음). 장시간 테스트 시 JWT(1h) 만료 주의 → 재로그인으로 토큰 갱신.
 
 ## ▶️ 다음 할 일 (이 순서로)
-1. ✅ ~~락 3종~~ / ✅ ~~4전략 리팩터~~ / ✅ ~~k6 4전략 비교~~ — 완료.
-2. **Redis 원자 차감** — 재고 카운터를 Redis(`DECR` 또는 Lua)에서 원자적으로 깎는 5번째 전략 추가 → 동일 k6 프리셋으로 DB atomic과 처리량 비교. (Redis는 로컬, docker-compose에 이미 정의됨.)
-3. (선택) 회차 평균·VU 스윕(10/50/100)으로 벤치 정밀화.
+1. ✅ ~~락 3종~~ / ✅ ~~4전략 리팩터~~ / ✅ ~~k6 4전략 비교~~ / ✅ ~~Redis 원자 차감(5번째)~~ — **W2 실험 전부 완료.**
+2. **최종 예매 전략 ADR 확정** — 5전략 비교 결과(redis 관문 + DB 기록, 정합성은 큐로) 근거를 `docs/decisions/`에 결정으로 남기기.
+3. **정합성 설계(W3~)**: Redis 선착순 관문 + 큐(BullMQ)로 DB 비동기 반영 — Redis 유실/재구성, 중복 방지 포함.
+4. (선택) 회차 평균·VU 스윕(10/50/100)으로 벤치 정밀화.
 
 ## 🧪 W2 벤치 실행법
 - 서버(`pnpm start:dev`)+로컬 PG 기동, admin 계정 존재 확인 후:
@@ -40,7 +42,8 @@
 ## 🖥️ 다른 기기에서 이어받는 법 (W2는 로컬 DB!)
 1. `git pull`
 2. 이 파일 읽기 → "다음 할 일"부터.
-3. **로컬 PG 기동**: `cd infra && docker compose up -d postgres` → `cd apps/api && pnpm exec prisma migrate deploy`.
+3. **로컬 PG + Redis 기동**: `cd infra && docker compose up -d postgres redis` → `cd apps/api && pnpm exec prisma migrate deploy`.
    - ⚠️ `apps/api/.env`의 `DATABASE_URL`이 로컬(`localhost:5432`)인지 확인. W2는 로컬, 공유 dev(Neon)로 돌아갈 땐 주석의 Neon URL로 교체.
+   - Redis는 `redis` 전략(5번째)·벤치에 필요. `.env`의 `REDIS_URL=redis://localhost:6379` 확인.
 4. 서버: `pnpm start:dev` (W2는 infisical 불필요 — 로컬 .env가 JWT_SECRET 등 다 제공).
 5. 더 깊은 맥락: `docs/DEVLOG.md` → `docs/decisions/` → `git log`.

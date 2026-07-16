@@ -162,3 +162,19 @@
   - atomic: 2030 / 30,470 / 0 / 30,470 / 41.3 → **거의 최고 속도 + 완벽 정확(승자)**
 - **결론**: hot row 고경합(=선착순)에선 **atomic > pessimistic > optimistic**. naive는 속도만 빠르고 정확성 상실. 낙관적 락은 단일 hot row 고경합에서 재시도 낭비로 부적합 — 앞서 개념으로 예측한 트레이드오프가 수치로 확인됨. → 문서: `docs/perf/2026-07-16-w2-lock-comparison.md`.
 - **다음**: Redis 원자 차감(`DECR`/Lua) 추가 후 동일 프리셋 비교 → DB 원자연산과의 처리량 차이 확인.
+
+## 2026-07-16 · W2 — Redis 인메모리 원자 차감(5번째 전략) + 5전략 k6 비교
+
+- **개념 정리**: Redis는 RAM 기반 key-value 저장소. **단일 스레드라 명령 하나가 원자적**(명령 "사이"엔 다른 요청을 받지만 명령 "도중"엔 안 끼어듦) → `DECRBY`가 그 자체로 lost update가 없다. DB atomic(조건부 단일 UPDATE)과 같은 "읽기+쓰기를 쪼갤 수 없게 묶기"의 다른 구현. 메모리 계층(디스크<RAM<L3~L1 캐시<레지스터)에서 RAM에 사는 게 속도 이점의 근거.
+- **구현**: `RedisService`(ioredis 5.11, PrismaService와 같은 `OnModuleInit/Destroy` 생명주기, `@Global` RedisModule) 추가. `createRedis`: `DECRBY stock:event:<id>` 반환값이 **음수면 `INCRBY`로 보상 후 409**, 아니면 `reservation.create`만 DB에 기록. `DECRBY`엔 재고 조건이 없어 0 밑으로 깎이므로 **반환값으로 매진 판정 + 넘친 만큼 되돌리기**가 핵심.
+- **스모크(재고 2·3요청)**: 201·201·409, Redis 재고 정확히 0 안착(음수 안 샘), DB 예매행 2건.
+- **결과(RPS / 성공 / 실제차감 / p95, VU30·15s·재고20만)**:
+  - naive 2338 / 35,091 / **1,441** / 33.6 → lost update 33,650(틀림)
+  - pessimistic 1126 / 16,912 / 16,912 / 67.9 ✅
+  - optimistic 859 / 4,640 / 4,640 / 61.9 ⚠️(재시도 8,262 실패)
+  - atomic 2024 / 30,374 / 30,374 / 41.8 ✅
+  - **redis 9354 / 140,329 / 140,329 / 4.4 ✅ — atomic의 4.6배, p95 최저, 완벽 정확**
+- **왜 redis가 atomic보다 4.6배?**(핵심 교훈): 둘 다 단일 카운터에서 직렬화되지만 ①**직렬 구간 1건당 비용**이 다름 — Postgres hot row UPDATE엔 행 락·MVCC·WAL이 붙고 Redis `DECRBY`는 RAM 정수 감산뿐. ②경합하는 차감을 DB에서 들어내니 **DB엔 경합 없는 병렬 INSERT만** 남음. 병목은 "DB가 느려서"가 아니라 **단일 재고 행 쓰기의 직렬화**였음.
+- **비용(정합성)**: 재고 진짜 값이 Redis에만 있어 DB `inventories`와 어긋남 + Redis 유실 시 재구성 필요. 실서비스는 Redis로 선착순 관문만 통과시키고 DB 반영은 큐로 뒤에서 맞춤(→ BullMQ 복선).
+- **삽질**: zsh에서 명령을 변수에 담아 `$R ping` 호출 시 "command not found"(통째로 명령명 취급) → 풀어서 실행. 옛 dev 서버가 ioredis 설치 전 상태로 떠 있어 kill 후 재기동(RedisModule 연결 반영).
+- **다음**: 재고 정합성(Redis 관문 + 큐 반영) 설계는 W3~. 최종 예매 전략은 ADR로 확정. 문서: `docs/perf/2026-07-16-w2-lock-comparison.md`.

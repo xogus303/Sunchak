@@ -5,17 +5,22 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { RedisService } from '../redis/redis.service';
 
-// W2 동시성 비교용 — 예매 재고 차감을 처리하는 4가지 전략.
+// W2 동시성 비교용 — 예매 재고 차감을 처리하는 5가지 전략.
 export type ReservationStrategy =
   | 'naive' // 방어 없음(초과판매 남) — '빠르지만 틀린' 기준선
   | 'pessimistic' // 비관적 락(FOR UPDATE + 트랜잭션)
   | 'optimistic' // 낙관적 락(version compare-and-swap + 재시도)
-  | 'atomic'; // DB 원자연산(조건부 단일 UPDATE)
+  | 'atomic' // DB 원자연산(조건부 단일 UPDATE)
+  | 'redis'; // Redis 인메모리 원자 차감(DECRBY + 넘치면 보상)
 
 @Injectable()
 export class ReservationsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly redis: RedisService,
+  ) {}
 
   // 낙관적 락 재시도 상한.
   private readonly MAX_RETRIES = 5;
@@ -39,6 +44,8 @@ export class ReservationsService {
         return this.createOptimistic(eventId, userId, quantity);
       case 'atomic':
         return this.createAtomic(eventId, userId, quantity);
+      case 'redis':
+        return this.createRedis(eventId, userId, quantity);
       default:
         throw new BadRequestException(`알 수 없는 strategy: ${String(strategy)}`);
     }
@@ -144,6 +151,26 @@ export class ReservationsService {
       data: { remainingQty: { decrement: quantity } },
     });
     if (result.count === 0) {
+      throw new ConflictException('재고가 부족합니다.');
+    }
+    return this.prisma.reservation.create({
+      data: { userId, eventId, quantity },
+    });
+  }
+
+  // ── 5) Redis 원자 차감 ───────────────────────────────────────
+  // 경합이 심한 "재고 확인+차감"을 DB가 아닌 Redis 인메모리 카운터에서 처리한다.
+  // DECRBY는 단일 스레드라 그 자체로 원자적 → lost update가 없다.
+  // 단, DECRBY엔 "재고 부족" 조건이 없어 0 밑으로도 깎인다.
+  //   → 반환값(차감 후 값)이 음수면 초과이므로, INCRBY로 되돌리고(보상) 409.
+  //   → 음수가 아니면 유효한 티켓 확보 → 예매 기록만 DB에 남긴다.
+  // 재고 카운터의 초깃값(seed)은 벤치 스크립트가 이벤트 생성 직후 Redis에 심는다.
+  private async createRedis(eventId: number, userId: number, quantity: number) {
+    const key = `stock:event:${eventId}`;
+    const remaining = await this.redis.decrby(key, quantity);
+    if (remaining < 0) {
+      // 방금 잘못 깎은 만큼 정확히 되돌린다(재고가 -로 새는 것 방지).
+      await this.redis.incrby(key, quantity);
       throw new ConflictException('재고가 부족합니다.');
     }
     return this.prisma.reservation.create({
