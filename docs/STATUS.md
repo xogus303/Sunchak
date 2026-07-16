@@ -5,36 +5,29 @@
 > - **세션 시작 시**: 이 파일을 가장 먼저 읽고 "다음 할 일"부터 이어간다.
 > - **세션 끝 / 커밋 전**: 이 파일을 **덮어써서** 최신 상태로 갱신한다. (시간순 이력·삽질은 `DEVLOG.md`, 결정 근거는 `decisions/`)
 
-**마지막 업데이트:** 2026-07-14 · 회사 기기 (W1 마무리 — 테스트 완료)
+**마지막 업데이트:** 2026-07-16 · 집 기기 (W2 시작 — 순진한 예매 + 초과판매 재현 완료)
 
 ---
 
 ## ✅ 완료
-- **W1 스키마**: `apps/api/prisma/schema.prisma` — User/Event/Inventory/Reservation/Payment + enum 4종 (→ ADR 0009). *단, 아직 실제 마이그레이션은 미실행.*
-- **W1 서버 뼈대**: NestJS 스캐폴딩 — ConfigModule(전역) + `@Global` PrismaService + `GET /health` (PORT 3001).
-- **인프라 결정**: Neon 클라우드 Postgres 프로젝트 `sunchak` 생성(싱가포르, PG18) (→ ADR 0010). 비밀값은 Infisical로 관리 (→ ADR 0011). 패키지 매니저 pnpm(corepack) (→ ADR 0012).
-- **Infisical 연결**: `apps/api`에 `infisical init` 완료(`.infisical.json`). Development 환경에 `DATABASE_URL`/`PORT`/`REDIS_URL` 저장. CLI는 `npm i -g @infisical/cli`로 설치.
-- **pnpm 전환 완료**: corepack로 pnpm@11 고정, `pnpm-lock.yaml`, `pnpm-workspace.yaml`의 `allowBuilds`로 prisma 빌드 허용.
-- **첫 마이그레이션 적용**: `20260714002709_init` — Neon에 테이블 5 + enum 4 + 인덱스/FK 생성.
-- **서버 기동 확인**: `/health` 200 응답 확인 완료.
-- **회원가입**: `POST /auth/signup` — DTO 검증 + argon2 해싱 + 유저 생성, 비번 해시 응답 제외 (→ ADR 0013). 전역 ValidationPipe.
-- **로그인**: `POST /auth/login` — `argon2.verify`로 비번 대조 후 JWT 발급(@nestjs/jwt, `JwtModule.registerAsync`로 JWT_SECRET/EXPIRES_IN 주입). 실패는 401 동일 메시지.
-- **보호 가드**: passport-jwt Strategy + `JwtAuthGuard` + `@CurrentUser` 데코레이터. `GET /auth/me`(유효 토큰 필요, 없으면 401).
-- **이벤트 CRUD**: `GET /events`(공개 목록), `GET /events/:id`(공개 상세, 없으면 404), `POST /events`(관리자만). 생성 시 Inventory 중첩 생성. `RolesGuard`+`@Roles(Role.ADMIN)`+`ParseIntPipe` 도입. tsc 통과.
-- **단위 테스트(W1 마무리)**: `auth.service.spec.ts`(5) + `events.service.spec.ts`(3), **총 8개 전부 통과**. Jest+ts-jest 셋업 완료(`pnpm test`). mock은 주입 의존성=`useValue`, 직접 import=`jest.mock`.
-- **런타임 고정**: Node **v22.23.1**로 버전업(pnpm11이 v22.13+ 요구). nvm default 지정 + 루트 `.nvmrc`로 두 기기 동일.
+- **W1 전체**: 스키마·마이그레이션·인증(회원가입/로그인/보호가드)·이벤트 CRUD·단위 테스트 8개. (자세한 건 이전 이력 참고 — DEVLOG)
+- **W2 로컬 실험 환경**: 로컬 Postgres(docker-compose, :5432) 기동 + `apps/api/.env`의 `DATABASE_URL`만 로컬로 교체(Neon URL은 주석 보존) + `prisma migrate deploy` 반영. 서버는 `pnpm start:dev`(infisical 없이, 로컬 .env 자동 로드).
+- **순진한 예매 API**: `reservations` 모듈 — `POST /events/:eventId/reservations`(JWT 필요). ①읽기 →②확인 →③절대값 덮어쓰기 차감 →④예매기록. 단일 요청 재고 5→4 정상 확인.
+- **초과판매(oversell) 재현**: 재고 1개에 동시 30개 → 전부 201, **예매 30건/초과판매 29건**. 재고는 lost update로 `-29`가 아닌 `0`(더 은밀). 재현 스크립트는 scratchpad, 지연은 ②③사이 `setTimeout(50ms)`(학습용, 커밋엔 포함).
 
 ## 🔨 진행 중 / 막힌 것
-- (없음). 참고: 관리자 라우트 테스트하려면 DB에서 유저 role을 ADMIN으로 바꾸고 **재로그인**(토큰에 role이 박히므로).
+- (없음). 참고: `reservations.service.ts`의 `setTimeout(50ms)`는 재현용 지연 — 락 실험 끝나면 제거 예정.
 
 ## ▶️ 다음 할 일 (이 순서로)
-1. **W2 동시성 실험**: 순진한 예매 구현 → 초과판매(oversell) 재현 → 락 3종(비관/낙관/DB) + Redis 비교 → k6 부하테스트. before/after 성능 문서화(§8).
+1. **비관적 락(pessimistic lock)** — `prisma.$transaction` + `SELECT … FOR UPDATE`(raw)로 재고 행을 잠가 남의 읽기 차단 → 같은 30개 동시요청에 정확히 1건만 성공하는지 검증.
+2. **낙관적 락(optimistic lock)** — `version` 컬럼으로 `UPDATE … WHERE version = ?` 후 실패 시 재시도. 비관 vs 낙관 비교.
+3. **DB 원자연산** — `{ decrement }` + `remainingQty >= quantity` 조건부 UPDATE(가장 단순한 해법) 비교.
+4. **Redis** 기반 접근 + **k6** 부하테스트로 before/after 성능 문서화(§8).
 
-> Infisical Development에 `JWT_SECRET`, `JWT_EXPIRES_IN`(=1h) 추가 완료.
-> 집 기기에서 이어받을 때: `nvm use`(=.nvmrc의 22.23.1) → `corepack pnpm install` → `corepack pnpm test`.
-
-## 🖥️ 다른 기기에서 이어받는 법
+## 🖥️ 다른 기기에서 이어받는 법 (W2는 로컬 DB!)
 1. `git pull`
-2. 이 파일(`docs/STATUS.md`) 읽기 → "다음 할 일"부터 시작.
-3. 비밀값이 필요하면 `infisical run --env=dev -- <명령>`으로 주입 (평문 `.env` 나르지 않음). CLI 없으면 `npm i -g @infisical/cli` 후 `infisical login`.
-4. 더 깊은 맥락이 필요하면 `docs/DEVLOG.md`(이력) → `docs/decisions/`(결정) → `git log` 순으로 확인.
+2. 이 파일 읽기 → "다음 할 일"부터.
+3. **로컬 PG 기동**: `cd infra && docker compose up -d postgres` → `cd apps/api && pnpm exec prisma migrate deploy`.
+   - ⚠️ `apps/api/.env`의 `DATABASE_URL`이 로컬(`localhost:5432`)인지 확인. W2는 로컬, 공유 dev(Neon)로 돌아갈 땐 주석의 Neon URL로 교체.
+4. 서버: `pnpm start:dev` (W2는 infisical 불필요 — 로컬 .env가 JWT_SECRET 등 다 제공).
+5. 더 깊은 맥락: `docs/DEVLOG.md` → `docs/decisions/` → `git log`.

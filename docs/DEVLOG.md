@@ -103,3 +103,13 @@
   3. `@nestjs/testing` 미설치로 `Test.createTestingModule` import 실패 → devDep 추가.
 - **추가 설치**: `jest`·`ts-jest`·`@types/jest`·`@nestjs/testing`(devDep), package.json에 jest 설정(`rootDir: src`, `testRegex: *.spec.ts`, `transform: ts-jest`, `testEnvironment: node`) + `test`/`test:watch`/`test:cov` 스크립트.
 - **다음(W2)**: 동시성 실험 — 순진한 예매 구현 → 초과판매(oversell) 재현 → 락 3종 + Redis 비교 + k6 부하테스트.
+
+## 2026-07-16 · W2 시작 — 순진한 예매 구현 + 초과판매(oversell) 재현
+
+- **로컬 실험 환경 분리(§9)**: W2 부하는 Neon 무료 한도를 깎으므로 로컬 Postgres로 분리. `infra/docker-compose.yml`의 PG(계정 `sunchak/sunchak`, :5432) 기동 → `apps/api/.env`의 `DATABASE_URL`만 로컬로 교체(기존 Neon URL은 주석 보존) → `prisma migrate deploy`로 스키마 반영. 서버는 infisical 없이 `pnpm start:dev`(로컬 .env 자동 로드).
+- **순진한 예매 API**: `reservations` 모듈 신규 — `POST /events/:eventId/reservations`(JWT 필요). 서비스 로직은 일부러 방어 없이 ①재고 읽기 → ②`remainingQty >= quantity` 확인 → ③`remainingQty = 읽은값 - quantity`로 **절대값 덮어쓰기** → ④예매 기록(status 기본 HELD). 단일 요청 검증: 재고 5→4 정상 차감 확인.
+- **초과판매 재현**: 재고 1개 이벤트에 동시 요청 30개 발사. race window를 결정적으로 벌리려 ②와 ③ 사이에 `await setTimeout(50ms)` 삽입(학습용 확대경, 실코드 아님).
+  - **결과**: 30개 전부 HTTP 201, **예매 30건 / 재고 1 → 초과판매 29건.**
+  - **핵심 관찰**: 재고가 `-29`가 아니라 **`0`**. ③을 절대값 덮어쓰기로 했기에 30번의 차감이 서로를 덮어써 사라짐(**lost update**) → 카운터가 "정상"처럼 0을 가리켜 오히려 버그가 안 보임. (원자연산 `{decrement:1}`이었다면 `-29`로 티는 났을 것 — 락 비교 때 재활용 예정.)
+- **개념 정리(사용자 학습)**: 버그의 근본은 `await`(지연)이 아니라 **①읽기·③쓰기가 원자적이지 않음**(별개의 두 DB 왕복 = "틈"). `setTimeout`은 틈을 *만든* 게 아니라 *넓힌* 것 — 없어도 버그는 존재하며(DB 지연·폭주 트래픽이 틈을 채움) 다만 확률적(flaky)이라 더 위험. 필요조건=내 읽기~쓰기 틈(방), 방아쇠=**다른 요청의 읽기가 그 틈에 입장**. → 락 = 그 방의 문을 잠가 남의 읽기를 못 들어오게 하는 것.
+- **다음**: 락 3종(비관/낙관/DB 원자연산) + Redis로 이 버그를 하나씩 막고 before/after 비교(§8). 첫 타자는 비관적 락(`SELECT … FOR UPDATE` + 트랜잭션).
