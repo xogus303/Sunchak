@@ -10,41 +10,51 @@ export class ReservationsService {
   constructor(private readonly prisma: PrismaService) {}
 
   /**
-   * ⚠️ 순진한(naive) 예매 — W2 학습용. 일부러 아무 동시성 방어가 없다.
-   * 재고 1개에 동시 요청이 몰리면 초과판매(oversell)가 난다. 이 버그를 재현한 뒤 고칠 것.
+   * 예매 — 비관적 락(pessimistic lock) 버전. (W2 락 3종 중 1번)
    *
-   * 흐름: ① 재고 읽기 → ② 남았는지 확인 → ③ 재고 차감 → ④ 예매 기록.
-   * 급소: ①읽기와 ③쓰기 사이의 틈에 다른 요청이 끼어들면 ②확인이 낡은 값 기준이 된다.
+   * 순진한 버전의 초과판매를 트랜잭션 + `SELECT … FOR UPDATE`로 막는다.
+   * 재고 행을 잠그고 읽으면, 커밋 전까지 다른 예매(쓰기)는 그 행에서 줄 서서 대기한다.
+   * → "내 읽기~쓰기 틈"에 남의 읽기가 못 들어오므로 낡은 값 기준 통과가 불가능.
+   *
+   * 흐름(전부 한 트랜잭션 안): ① 잠그고 읽기 → ② 확인 → ③ 차감 → ④ 기록.
    */
   async create(eventId: number, userId: number, quantity: number) {
-    // ① 재고를 읽는다 (이 순간의 스냅샷 — 곧 낡을 수 있는 값)
-    const inventory = await this.prisma.inventory.findUnique({
-      where: { eventId },
-    });
-    if (!inventory) {
-      throw new NotFoundException('이벤트 재고를 찾을 수 없습니다.');
-    }
+    // $transaction(콜백) = 인터랙티브 트랜잭션. tx.* 호출은 모두 한 트랜잭션에서 실행되고,
+    // 콜백이 정상 반환하면 커밋(락 해제), 예외를 던지면 롤백(락 해제)된다.
+    return this.prisma.$transaction(async (tx) => {
+      // ① 잠그고 읽는다. Prisma 쿼리빌더엔 FOR UPDATE가 없어 raw로 실행.
+      //    태그드 템플릿의 ${eventId}는 Prisma가 파라미터로 바인딩(SQL 인젝션 방지).
+      //    camelCase 컬럼은 Postgres에서 "쌍따옴표"로 감싸야 한다.
+      const rows = await tx.$queryRaw<
+        { id: number; remainingQty: number }[]
+      >`SELECT id, "remainingQty" FROM inventories WHERE "eventId" = ${eventId} FOR UPDATE`;
+      const inventory = rows[0];
+      if (!inventory) {
+        throw new NotFoundException('이벤트 재고를 찾을 수 없습니다.');
+      }
 
-    // ② 남았는지 확인한다 — ①에서 읽은 과거 값 기준이라 이미 위태롭다
-    if (inventory.remainingQty < quantity) {
-      throw new ConflictException('재고가 부족합니다.');
-    }
+      // ② 확인 — 이제 이 값은 락이 보장하는 "나만 보는 최신 값"이다
+      if (inventory.remainingQty < quantity) {
+        throw new ConflictException('재고가 부족합니다.');
+      }
 
-    // ★ [W2 재현용] race window를 인위적으로 벌린다. 이 요청을 50ms 재우는 동안
-    //   다른 동시 요청들이 ①읽기를 끝내고 같은 낡은 값으로 ②를 통과한다.
-    //   (실서비스 코드 아님 — 초과판매를 100% 재현해 보여주려는 학습용 지연.)
-    await new Promise((resolve) => setTimeout(resolve, 50));
+      // ★ 순진한 버전에서 버그를 100% 재현시켰던 그 지연을 일부러 남겨둔다.
+      //   락이 이 넓은 틈에도 버티는지(=초과판매가 사라지는지) 확인하려는 것.
+      await new Promise((resolve) => setTimeout(resolve, 50));
 
-    // ③ 재고를 깎는다 — 앱이 계산한 절대값으로 덮어쓴다(가장 순진한 방식).
-    //    다른 요청의 차감이 여기서 통째로 사라질 수 있다(lost update).
-    await this.prisma.inventory.update({
-      where: { id: inventory.id },
-      data: { remainingQty: inventory.remainingQty - quantity },
-    });
+      // ③ 차감 (같은 트랜잭션 tx로 — 그래야 락 안에서 처리됨)
+      await tx.inventory.update({
+        where: { id: inventory.id },
+        data: { remainingQty: inventory.remainingQty - quantity },
+      });
 
-    // ④ 예매 기록을 만든다 (status는 스키마 기본값 HELD)
-    return this.prisma.reservation.create({
-      data: { userId, eventId, quantity },
-    });
+      // ④ 예매 기록
+      return tx.reservation.create({
+        data: { userId, eventId, quantity },
+      });
+    },
+    // 락은 요청을 직렬화한다(줄 세움). 뒤 요청이 락을 기다리는 시간을 넉넉히 허용.
+    //   maxWait: 트랜잭션 시작(커넥션 확보)까지 대기 한도, timeout: 트랜잭션 최대 수행시간.
+    { maxWait: 20000, timeout: 20000 });
   }
 }
