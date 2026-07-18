@@ -52,3 +52,4 @@
 | [0011](./0011-secrets-infisical.md) | 비밀값 관리: Infisical | Accepted |
 | [0012](./0012-package-manager-pnpm.md) | 패키지 매니저: pnpm (corepack) | Accepted |
 | [0013](./0013-auth-approach.md) | 인증: argon2 해싱 + JWT + DTO 검증 | Accepted |
+| [0014](./0014-reservation-strategy.md) | 선착순 예매 재고 차감: Redis 관문 + DB 비동기 기록 | Accepted |

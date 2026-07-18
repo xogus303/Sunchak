@@ -5,7 +5,7 @@
 > - **세션 시작 시**: 이 파일을 가장 먼저 읽고 "다음 할 일"부터 이어간다.
 > - **세션 끝 / 커밋 전**: 이 파일을 **덮어써서** 최신 상태로 갱신한다. (시간순 이력·삽질은 `DEVLOG.md`, 결정 근거는 `decisions/`)
 
-**마지막 업데이트:** 2026-07-16 · 집 기기 (W2 — Redis 원자 차감까지 완료 = 5전략 비교 끝, W2 마무리)
+**마지막 업데이트:** 2026-07-18 (W2 완전 종료 — 개념 재확인 + 최종 예매 전략 ADR 0014 확정. 다음은 W3 정합성 설계)
 
 ---
 
@@ -20,15 +20,15 @@
 - **4전략 런타임 선택 리팩터**: `create()`가 `?strategy=naive|pessimistic|optimistic|atomic`로 분기(생략 시 atomic). 4방식 모두 현재 코드에 공존.
 - **Redis 인메모리 원자 차감(5번째 전략)**: `RedisService`(ioredis, `@Global`, Prisma와 같은 생명주기) + `createRedis` — `DECRBY` 후 음수면 `INCRBY` 보상+409, 아니면 `reservation.create`만 DB에. 재고 seed는 bench.sh가 `redis-cli SET`으로.
 - **k6 5전략 부하 비교(§8)**: VU30·15s·재고20만·hot row. **redis 압도적 승자**(RPS 9354·p95 4.4ms·완벽 정확 = atomic의 4.6배), atomic 2024(정확), naive lost update 3.3만, optimistic 재시도 8,262 실패, pessimistic 정확하나 느림. **교훈: 병목은 DB가 아니라 단일 재고 행 쓰기의 직렬화** — Redis로 빼면 DB는 병렬 INSERT만. 비용은 정합성(Redis↔DB). 문서: `docs/perf/2026-07-16-w2-lock-comparison.md`. 스크립트: `apps/api/test/load/`.
+- **최종 예매 전략 ADR 0014 확정**: `docs/decisions/0014-reservation-strategy.md` — **Redis 인메모리 관문(`DECRBY`+보상) + DB 비동기 기록** 채택(DB 단독 폴백은 atomic). 근거 논리 사슬: hot row는 구조적으로 못 피함 → DB 직렬 1건당 비용 큼(행 락=Isolation·MVCC 새 버전·WAL fsync=Durability) → Redis는 그 보장 일부 포기(락·MVCC 없음 + fsync 비동기화)로 비용 최소화 → 대가는 정합성·유실. 개념(ACID/행락/MVCC/WAL·fsync)은 사용자 자기설명으로 검증 완료(DEVLOG 2026-07-18).
 
 ## 🔨 진행 중 / 막힌 것
 - (없음). 장시간 테스트 시 JWT(1h) 만료 주의 → 재로그인으로 토큰 갱신.
 
 ## ▶️ 다음 할 일 (이 순서로)
-1. ✅ ~~락 3종~~ / ✅ ~~4전략 리팩터~~ / ✅ ~~k6 4전략 비교~~ / ✅ ~~Redis 원자 차감(5번째)~~ — **W2 실험 전부 완료.**
-2. **최종 예매 전략 ADR 확정** — 5전략 비교 결과(redis 관문 + DB 기록, 정합성은 큐로) 근거를 `docs/decisions/`에 결정으로 남기기.
-3. **정합성 설계(W3~)**: Redis 선착순 관문 + 큐(BullMQ)로 DB 비동기 반영 — Redis 유실/재구성, 중복 방지 포함.
-4. (선택) 회차 평균·VU 스윕(10/50/100)으로 벤치 정밀화.
+1. ✅ ~~락 3종~~ / ✅ ~~4전략 리팩터~~ / ✅ ~~k6 5전략 비교~~ / ✅ ~~Redis 원자 차감~~ / ✅ ~~최종 예매 전략 ADR 0014~~ — **W2 완전 종료.**
+2. **정합성 설계(W3~) 착수** — Redis 선착순 관문 + 큐(BullMQ)로 DB 비동기 반영. 다뤄야 할 것: ①Redis↔DB 어긋남 처리, ②Redis 유실 시 재고 카운터 재구성, ③멱등성(중복 요청 이중 차감 방지). 설계 확정되면 후속 ADR로 남기기.
+3. (선택) 회차 평균·VU 스윕(10/50/100)으로 벤치 정밀화.
 
 ## 🧪 W2 벤치 실행법
 - 서버(`pnpm start:dev`)+로컬 PG 기동, admin 계정 존재 확인 후:
