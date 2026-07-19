@@ -185,3 +185,11 @@
 - **오해 교정 2건**: (1) "커넥션 오버헤드"는 풀 재사용이라 주범 아님. (2) "재고 20만으로 흩어져도 똑같이 느림"은 틀림 — 행 락이 사라지면 **병렬화**되어 처리량 폭증(계산대 1개 vs 20만 개). DB가 느린 진짜 이유는 건당 비용이 아니라 **hot row 직렬화로 병렬화가 원천 차단**된 것.
 - **ADR 0014 작성**: `docs/decisions/0014-reservation-strategy.md` — **Redis 인메모리 관문(`DECRBY`+보상) + DB 비동기 기록** 채택. 5전략 비교표를 "채택하지 않은 이유"로, 위 논리 사슬을 근거(Rationale)로, 대가(정합성·유실·경계검사·중복방지)를 결과(Consequences)로. DB 단독 시 차선은 atomic(폴백). README 인덱스 갱신.
 - **다음**: 정합성 설계(W3~) — Redis 관문 + BullMQ 비동기 반영, Redis↔DB 정합성·유실 재구성·멱등(중복 방지). 후속 ADR로 확정.
+
+## 2026-07-19 · W3 정합성 설계 개념 완주 + ADR 0015 확정
+
+- **개념 설계(사용자 자기설명으로 검증)**: ADR 0014의 Redis 관문 뒤를 어떻게 신뢰성 있게 처리할지 세 문제(①Redis↔DB 어긋남 ②Redis 유실 재구성 ③멱등성)를 파이프라인으로 풀었다. 관문(Redis DECRBY) → **HELD 선기록(DB INSERT)** → 큐(BullMQ) → 즉시 응답 → 워커가 HELD→CONFIRMED UPDATE → SSE push. + HELD TTL 만료 + Redis 재구성(`총재고 − (HELD+CONFIRMED)`).
+- **핵심 개념 4개**: (1) **큐/워커** — 작업을 Redis에 영속 저장(프로세스 밖·재시작 견딤), 생산자(API)/소비자(워커) 분리. (2) **at-least-once → 멱등성** — "작업 성공했는데 응답 유실"로 재시도 시 중복 INSERT. 막는 법 = **멱등성 키 + unique 제약**(DB가 원자적으로 거부, 워커는 P2002를 "이미 됨=성공"으로 삼킴). read-check-write 함정을 DB 한 방으로 = W2 atomic과 같은 철학. (3) **확정 통보** — 폴링(요청 폭탄) 대신 **SSE**(0006). (4) **Redis 유실 재구성** — Redis 재고는 진실 아닌 DB 파생 사본. 단 HELD가 Redis/큐에만 있으면 재구성 부정확 → **최초 시점부터 DB에 HELD 선기록**해야 정확 복구.
+- **정밀화(헷갈리기 쉬운 자리)**: ① 재고 차감은 hot row라 Redis로 뺐지만 ② HELD INSERT는 서로 다른 행이라 **경합 없는 병렬** — "직렬화 병목 ≠ INSERT 비용". 세 단계의 '원자성'은 각기 다른 문제(초과판매/중복/확정)를 푼다. unique는 DB가 자동 거부하되 그 에러를 성공으로 해석하는 건 워커 코드의 몫.
+- **문서**: `docs/decisions/0015-reservation-consistency-design.md`(ADR 0014의 정합성 편), README 인덱스 갱신.
+- **다음**: 구현 착수 — 스키마 변경(reservation.status HELD/CONFIRMED/EXPIRED + 멱등성 키 unique + heldAt) → 마이그레이션 → BullMQ 큐/워커 + SSE + HELD 선기록/확정/TTL/재구성.

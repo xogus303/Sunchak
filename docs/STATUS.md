@@ -5,7 +5,7 @@
 > - **세션 시작 시**: 이 파일을 가장 먼저 읽고 "다음 할 일"부터 이어간다.
 > - **세션 끝 / 커밋 전**: 이 파일을 **덮어써서** 최신 상태로 갱신한다. (시간순 이력·삽질은 `DEVLOG.md`, 결정 근거는 `decisions/`)
 
-**마지막 업데이트:** 2026-07-18 (W2 완전 종료 — 개념 재확인 + 최종 예매 전략 ADR 0014 확정. 다음은 W3 정합성 설계)
+**마지막 업데이트:** 2026-07-19 (W3 정합성 설계 개념 완주 + ADR 0015 확정. 다음은 W3 구현 착수 — 스키마 변경부터)
 
 ---
 
@@ -21,13 +21,19 @@
 - **Redis 인메모리 원자 차감(5번째 전략)**: `RedisService`(ioredis, `@Global`, Prisma와 같은 생명주기) + `createRedis` — `DECRBY` 후 음수면 `INCRBY` 보상+409, 아니면 `reservation.create`만 DB에. 재고 seed는 bench.sh가 `redis-cli SET`으로.
 - **k6 5전략 부하 비교(§8)**: VU30·15s·재고20만·hot row. **redis 압도적 승자**(RPS 9354·p95 4.4ms·완벽 정확 = atomic의 4.6배), atomic 2024(정확), naive lost update 3.3만, optimistic 재시도 8,262 실패, pessimistic 정확하나 느림. **교훈: 병목은 DB가 아니라 단일 재고 행 쓰기의 직렬화** — Redis로 빼면 DB는 병렬 INSERT만. 비용은 정합성(Redis↔DB). 문서: `docs/perf/2026-07-16-w2-lock-comparison.md`. 스크립트: `apps/api/test/load/`.
 - **최종 예매 전략 ADR 0014 확정**: `docs/decisions/0014-reservation-strategy.md` — **Redis 인메모리 관문(`DECRBY`+보상) + DB 비동기 기록** 채택(DB 단독 폴백은 atomic). 근거 논리 사슬: hot row는 구조적으로 못 피함 → DB 직렬 1건당 비용 큼(행 락=Isolation·MVCC 새 버전·WAL fsync=Durability) → Redis는 그 보장 일부 포기(락·MVCC 없음 + fsync 비동기화)로 비용 최소화 → 대가는 정합성·유실. 개념(ACID/행락/MVCC/WAL·fsync)은 사용자 자기설명으로 검증 완료(DEVLOG 2026-07-18).
+- **W3 정합성 설계 개념 완주 + ADR 0015 확정**: `docs/decisions/0015-reservation-consistency-design.md` — 관문(Redis DECRBY) → **HELD 선기록(DB INSERT+멱등성 키 unique)** → 큐(BullMQ) → 즉시 응답 → 워커가 HELD→CONFIRMED UPDATE(P2002=이미 됨 삼킴) → SSE push. + HELD TTL 만료 + Redis 재구성(`총재고 − (HELD+CONFIRMED)`). W3 3과제(어긋남/유실 재구성/멱등성) 개념적으로 전부 해결. 아직 **코드는 없음(설계만)**.
 
 ## 🔨 진행 중 / 막힌 것
 - (없음). 장시간 테스트 시 JWT(1h) 만료 주의 → 재로그인으로 토큰 갱신.
 
 ## ▶️ 다음 할 일 (이 순서로)
-1. ✅ ~~락 3종~~ / ✅ ~~4전략 리팩터~~ / ✅ ~~k6 5전략 비교~~ / ✅ ~~Redis 원자 차감~~ / ✅ ~~최종 예매 전략 ADR 0014~~ — **W2 완전 종료.**
-2. **정합성 설계(W3~) 착수** — Redis 선착순 관문 + 큐(BullMQ)로 DB 비동기 반영. 다뤄야 할 것: ①Redis↔DB 어긋남 처리, ②Redis 유실 시 재고 카운터 재구성, ③멱등성(중복 요청 이중 차감 방지). 설계 확정되면 후속 ADR로 남기기.
+1. ✅ ~~W2 전체~~ / ✅ ~~예매 전략 ADR 0014~~ / ✅ ~~W3 정합성 **설계**(개념) + ADR 0015~~ — 여기까지 완료.
+2. **W3 구현 착수** (ADR 0015를 코드로) — 이 순서로:
+   1. **스키마 변경**: `reservation`에 `status`(HELD/CONFIRMED/EXPIRED) + 멱등성 키 컬럼(+`@unique`) + `heldAt`(TTL 판정). → `prisma migrate dev` → 검증: 마이그레이션 적용·Prisma Client 재생성.
+   2. **HELD 선기록**: 관문(DECRBY) 통과 즉시 멱등성 키 발급 + `status=HELD` INSERT. → 검증: 관문 통과분이 DB에 HELD로 남는지.
+   3. **BullMQ 큐/워커**: 큐 모듈 + 워커가 HELD→CONFIRMED UPDATE, unique 위반(P2002)은 성공으로 삼킴. → 검증: job 처리 후 CONFIRMED, 중복 job에도 1건 유지.
+   4. **SSE**: 확정 시 클라이언트로 push. → 검증: 상태 변화가 실시간 전달되는지.
+   5. **안전장치**: HELD TTL 만료 회수 + Redis 유실 재구성(`총재고−(HELD+CONFIRMED)`) 잡. → 검증: Redis flush 후 재구성값 정확.
 3. (선택) 회차 평균·VU 스윕(10/50/100)으로 벤치 정밀화.
 
 ## 🧪 W2 벤치 실행법
