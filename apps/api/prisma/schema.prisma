@@ -90,19 +90,21 @@ model Inventory {
 }
 
 model Reservation {
-  id        Int               @id @default(autoincrement())
-  userId    Int
-  eventId   Int
-  quantity  Int
-  status    ReservationStatus @default(HELD)
-  heldUntil DateTime? // HELD 상태에서만 의미 있음(홀드 만료 시각). 확정 후 null 가능.
-  createdAt DateTime          @default(now())
-  updatedAt DateTime          @updatedAt
+  id             Int               @id @default(autoincrement())
+  userId         Int
+  eventId        Int
+  quantity       Int
+  status         ReservationStatus @default(HELD)
+  idempotencyKey String // ★ 클라이언트가 발급하는 요청 이름표(UUID). 재전송 시 같은 값 유지(ADR 0015)
+  heldUntil      DateTime? // HELD 상태에서만 의미 있음(홀드 만료 시각). 확정 후 null 가능.
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
 
   user    User     @relation(fields: [userId], references: [id])
   event   Event    @relation(fields: [eventId], references: [id])
   payment Payment?
 
+  @@unique([userId, idempotencyKey]) // ★ "같은 요청" = 같은 사람 + 같은 이름표. 재전송 INSERT를 DB가 원자적으로 거부(P2002)
   @@index([userId]) // "내 예매 내역" 조회
   @@index([eventId, status]) // 관리자 판매 현황, 상태별 집계
   @@index([status, heldUntil]) // 만료된 홀드 스윕(청소 워커)이 HELD + heldUntil<now 스캔

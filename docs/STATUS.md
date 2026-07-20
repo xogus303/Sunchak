@@ -5,7 +5,7 @@
 > - **세션 시작 시**: 이 파일을 가장 먼저 읽고 "다음 할 일"부터 이어간다.
 > - **세션 끝 / 커밋 전**: 이 파일을 **덮어써서** 최신 상태로 갱신한다. (시간순 이력·삽질은 `DEVLOG.md`, 결정 근거는 `decisions/`)
 
-**마지막 업데이트:** 2026-07-19 (W3 정합성 설계 개념 완주 + ADR 0015 확정. 다음은 W3 구현 착수 — 스키마 변경부터)
+**마지막 업데이트:** 2026-07-20 (ADR 0015 멱등성 개정 + 스키마 변경 완료. **다음은 마이그레이션 — 기존 행 처리 방식 선택부터**)
 
 ---
 
@@ -21,20 +21,28 @@
 - **Redis 인메모리 원자 차감(5번째 전략)**: `RedisService`(ioredis, `@Global`, Prisma와 같은 생명주기) + `createRedis` — `DECRBY` 후 음수면 `INCRBY` 보상+409, 아니면 `reservation.create`만 DB에. 재고 seed는 bench.sh가 `redis-cli SET`으로.
 - **k6 5전략 부하 비교(§8)**: VU30·15s·재고20만·hot row. **redis 압도적 승자**(RPS 9354·p95 4.4ms·완벽 정확 = atomic의 4.6배), atomic 2024(정확), naive lost update 3.3만, optimistic 재시도 8,262 실패, pessimistic 정확하나 느림. **교훈: 병목은 DB가 아니라 단일 재고 행 쓰기의 직렬화** — Redis로 빼면 DB는 병렬 INSERT만. 비용은 정합성(Redis↔DB). 문서: `docs/perf/2026-07-16-w2-lock-comparison.md`. 스크립트: `apps/api/test/load/`.
 - **최종 예매 전략 ADR 0014 확정**: `docs/decisions/0014-reservation-strategy.md` — **Redis 인메모리 관문(`DECRBY`+보상) + DB 비동기 기록** 채택(DB 단독 폴백은 atomic). 근거 논리 사슬: hot row는 구조적으로 못 피함 → DB 직렬 1건당 비용 큼(행 락=Isolation·MVCC 새 버전·WAL fsync=Durability) → Redis는 그 보장 일부 포기(락·MVCC 없음 + fsync 비동기화)로 비용 최소화 → 대가는 정합성·유실. 개념(ACID/행락/MVCC/WAL·fsync)은 사용자 자기설명으로 검증 완료(DEVLOG 2026-07-18).
-- **W3 정합성 설계 개념 완주 + ADR 0015 확정**: `docs/decisions/0015-reservation-consistency-design.md` — 관문(Redis DECRBY) → **HELD 선기록(DB INSERT+멱등성 키 unique)** → 큐(BullMQ) → 즉시 응답 → 워커가 HELD→CONFIRMED UPDATE(P2002=이미 됨 삼킴) → SSE push. + HELD TTL 만료 + Redis 재구성(`총재고 − (HELD+CONFIRMED)`). W3 3과제(어긋남/유실 재구성/멱등성) 개념적으로 전부 해결. 아직 **코드는 없음(설계만)**.
+- **W3 정합성 설계 개념 완주 + ADR 0015 확정**: `docs/decisions/0015-reservation-consistency-design.md` — 관문(Redis DECRBY) → **HELD 선기록(DB INSERT)** → 큐(BullMQ) → 즉시 응답 → 워커가 HELD→CONFIRMED UPDATE → SSE push. + HELD TTL 만료 + Redis 재구성(`총재고 − (HELD+CONFIRMED)`). W3 3과제(어긋남/유실 재구성/멱등성) 개념적으로 전부 해결.
+- **ADR 0015 멱등성 부분 개정 (2026-07-20)**: 구현 착수 직전 검토에서 오류 2건 발견·수정. ①**"워커 재시도의 중복 INSERT를 unique가 막는다"는 성립 안 함** — INSERT는 요청 경로에서 1회뿐이고 워커는 UPDATE만 함. 워커 UPDATE는 `WHERE status=HELD`라 본래 멱등이라 별도 장치 불필요. ②**멱등성 키는 서버가 아니라 클라이언트가 발급** — 서버는 "재전송"과 "진짜 두 번째 주문"을 요청 내용만으로 구분 불가(내용이 동일). ③신규: 관문이 INSERT보다 먼저라 **재전송도 `DECRBY`를 한 번 더 깎음** → 그대로 두면 주문 없이 재고 증발(조용함·누적·거짓 품절) → **unique 위반 시 `INCRBY` 보상 + 첫 요청과 같은 성공 응답**(409 아님). 개정 이력은 ADR 상단에 보존.
+- **스키마 변경 (커밋됨, 마이그레이션은 미실행)**: `Reservation`에 `idempotencyKey String`(필수) + `@@unique([userId, idempotencyKey])` 추가. 복합인 이유는 **"같은 요청" = 같은 사람 + 같은 이름표**라는 정의를 그대로 옮긴 것(단독 unique는 남의 키와 충돌 → 타인 예매 유출 경로가 생김). ⚠️ `status`·`heldUntil`·`@@index([status, heldUntil])`은 **W1에 이미 존재**(이전 STATUS의 "status/heldAt 추가"는 착오).
 
 ## 🔨 진행 중 / 막힌 것
-- (없음). 장시간 테스트 시 JWT(1h) 만료 주의 → 재로그인으로 토큰 갱신.
+- **⛔ 마이그레이션이 막혀 있음 — 다음 세션 첫 작업.** `schema.prisma`는 고쳤지만 `migrate dev`를 아직 못 돌렸다. `reservations`에 **W2 벤치가 만든 수만 행**이 있어, 기본값 없는 NOT NULL 컬럼(`idempotencyKey`) 추가가 실패한다("기존 행에 뭘 넣지?"). 선택지:
+  - **A) `prisma migrate reset`** (추천) — 로컬 DB 초기화 후 마이그레이션. 로컬 한정 쓰레기 데이터고 시드로 재현 가능. 공유 DB(Neon) 아니라 다른 기기 영향 없음.
+  - B) 컬럼을 `String?`(nullable)로 — 데이터 보존하되 "이름표 없는 예매"가 허용돼 규칙에 구멍.
+  - C) 임시 기본값 넣고 제거 — 실데이터 있을 때의 정공법이나 지금은 과함.
+  - → **사용자 승인 대기 중.** A 선택 시: `cd infra && docker compose up -d postgres redis` → `cd apps/api && pnpm exec prisma migrate reset` → `pnpm exec prisma migrate dev --name add_reservation_idempotency_key`.
+- 장시간 테스트 시 JWT(1h) 만료 주의 → 재로그인으로 토큰 갱신.
 
 ## ▶️ 다음 할 일 (이 순서로)
-1. ✅ ~~W2 전체~~ / ✅ ~~예매 전략 ADR 0014~~ / ✅ ~~W3 정합성 **설계**(개념) + ADR 0015~~ — 여기까지 완료.
-2. **W3 구현 착수** (ADR 0015를 코드로) — 이 순서로:
-   1. **스키마 변경**: `reservation`에 `status`(HELD/CONFIRMED/EXPIRED) + 멱등성 키 컬럼(+`@unique`) + `heldAt`(TTL 판정). → `prisma migrate dev` → 검증: 마이그레이션 적용·Prisma Client 재생성.
-   2. **HELD 선기록**: 관문(DECRBY) 통과 즉시 멱등성 키 발급 + `status=HELD` INSERT. → 검증: 관문 통과분이 DB에 HELD로 남는지.
-   3. **BullMQ 큐/워커**: 큐 모듈 + 워커가 HELD→CONFIRMED UPDATE, unique 위반(P2002)은 성공으로 삼킴. → 검증: job 처리 후 CONFIRMED, 중복 job에도 1건 유지.
+1. ✅ ~~W2 전체~~ / ✅ ~~ADR 0014~~ / ✅ ~~W3 설계 + ADR 0015(+ 2026-07-20 멱등성 개정)~~ / ✅ ~~스키마 변경(코드)~~ — 여기까지 완료.
+2. **W3 구현** (ADR 0015를 코드로) — 이 순서로:
+   1. **마이그레이션 실행** ← ⛔ 위 "막힌 것"의 A/B/C 선택부터. → 검증: 마이그레이션 적용·Prisma Client 재생성.
+   2. **HELD 선기록**: 요청에서 클라이언트 발급 멱등성 키 수신(DTO) → 관문(DECRBY) 통과 즉시 `status=HELD` INSERT. **P2002(재전송) 시 `INCRBY` 보상 + 기존 예매를 그대로 성공 응답**(409 아님). → 검증: 같은 키 2회 요청 시 예매 1건 유지 + Redis 재고가 1만 깎였는지(보상 확인).
+   3. **BullMQ 큐/워커**: 큐 모듈 + 워커가 `WHERE status=HELD`로 CONFIRMED UPDATE(재실행 시 0건 = 본래 멱등). → 검증: job 처리 후 CONFIRMED, 같은 job 2회에도 1건 유지.
    4. **SSE**: 확정 시 클라이언트로 push. → 검증: 상태 변화가 실시간 전달되는지.
    5. **안전장치**: HELD TTL 만료 회수 + Redis 유실 재구성(`총재고−(HELD+CONFIRMED)`) 잡. → 검증: Redis flush 후 재구성값 정확.
-3. (선택) 회차 평균·VU 스윕(10/50/100)으로 벤치 정밀화.
+3. (선택) `Payment.idempotencyKey`도 단독 unique — 같은 유출 문제 가능. W3 결제 단계에서 재검토.
+4. (선택) 회차 평균·VU 스윕(10/50/100)으로 벤치 정밀화.
 
 ## 🧪 W2 벤치 실행법
 - 서버(`pnpm start:dev`)+로컬 PG 기동, admin 계정 존재 확인 후:
