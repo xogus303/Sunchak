@@ -35,6 +35,7 @@ export class ReservationsController {
       user.id,
       dto.quantity,
       strategy,
+      dto.idempotencyKey,
     );
   }
 }

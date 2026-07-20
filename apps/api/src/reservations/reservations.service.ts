@@ -4,16 +4,20 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
+import { Prisma, ReservationStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
 
 // W2 동시성 비교용 — 예매 재고 차감을 처리하는 5가지 전략.
+// + W3 최종 흐름(held): 관문(DECRBY) + HELD 선기록 + 멱등성 보상.
 export type ReservationStrategy =
   | 'naive' // 방어 없음(초과판매 남) — '빠르지만 틀린' 기준선
   | 'pessimistic' // 비관적 락(FOR UPDATE + 트랜잭션)
   | 'optimistic' // 낙관적 락(version compare-and-swap + 재시도)
   | 'atomic' // DB 원자연산(조건부 단일 UPDATE)
-  | 'redis'; // Redis 인메모리 원자 차감(DECRBY + 넘치면 보상)
+  | 'redis' // Redis 인메모리 원자 차감(DECRBY + 넘치면 보상)
+  | 'held'; // W3 최종 흐름 — 관문 통과 후 status=HELD로 선기록 + 재전송 멱등 처리
 
 @Injectable()
 export class ReservationsService {
@@ -26,14 +30,16 @@ export class ReservationsService {
   private readonly MAX_RETRIES = 5;
 
   /**
-   * 예매 진입점 — strategy에 따라 4가지 구현으로 분기한다(W2 벤치마크 비교용).
-   * 실서비스라면 한 전략만 두겠지만, k6로 처리량을 비교하려고 런타임 선택을 허용한다.
+   * 예매 진입점 — strategy에 따라 각 구현으로 분기한다.
+   * naive~redis는 W2 벤치마크 비교용, held는 W3 최종 흐름의 진입부다.
+   * idempotencyKey는 held에서만 쓰는 클라이언트 발급 이름표(그 외 전략은 무시).
    */
   create(
     eventId: number,
     userId: number,
     quantity: number,
     strategy: ReservationStrategy = 'atomic',
+    idempotencyKey?: string,
   ) {
     switch (strategy) {
       case 'naive':
@@ -46,10 +52,16 @@ export class ReservationsService {
         return this.createAtomic(eventId, userId, quantity);
       case 'redis':
         return this.createRedis(eventId, userId, quantity);
+      case 'held':
+        return this.createHeld(eventId, userId, quantity, idempotencyKey);
       default:
         throw new BadRequestException(`알 수 없는 strategy: ${String(strategy)}`);
     }
   }
+
+  // W2 5전략(naive~redis)은 멱등성이 목적이 아니다. idempotencyKey는 NOT NULL을
+  // 만족시키고 (userId, idempotencyKey) unique 충돌을 피하기 위해 서버가 임의 발급한다.
+  // (같은 유저가 수만 건 만드는 벤치에서도 매번 새 UUID라 충돌하지 않음.)
 
   // ── 1) 순진한 버전 ────────────────────────────────────────────
   // ①읽기 →②확인 →③절대값 덮어쓰기 →④기록. 읽기·쓰기가 별개 문장이라 그 틈에
@@ -69,7 +81,7 @@ export class ReservationsService {
       data: { remainingQty: inventory.remainingQty - quantity },
     });
     return this.prisma.reservation.create({
-      data: { userId, eventId, quantity },
+      data: { userId, eventId, quantity, idempotencyKey: randomUUID() },
     });
   }
 
@@ -96,7 +108,9 @@ export class ReservationsService {
           where: { id: inventory.id },
           data: { remainingQty: inventory.remainingQty - quantity },
         });
-        return tx.reservation.create({ data: { userId, eventId, quantity } });
+        return tx.reservation.create({
+          data: { userId, eventId, quantity, idempotencyKey: randomUUID() },
+        });
       },
       { maxWait: 20000, timeout: 20000 },
     );
@@ -131,7 +145,7 @@ export class ReservationsService {
         continue; // 충돌 → 재시도
       }
       return this.prisma.reservation.create({
-        data: { userId, eventId, quantity },
+        data: { userId, eventId, quantity, idempotencyKey: randomUUID() },
       });
     }
     throw new ConflictException(
@@ -154,7 +168,7 @@ export class ReservationsService {
       throw new ConflictException('재고가 부족합니다.');
     }
     return this.prisma.reservation.create({
-      data: { userId, eventId, quantity },
+      data: { userId, eventId, quantity, idempotencyKey: randomUUID() },
     });
   }
 
@@ -174,7 +188,57 @@ export class ReservationsService {
       throw new ConflictException('재고가 부족합니다.');
     }
     return this.prisma.reservation.create({
-      data: { userId, eventId, quantity },
+      data: { userId, eventId, quantity, idempotencyKey: randomUUID() },
     });
+  }
+
+  // ── 6) HELD 선기록 (W3 최종 흐름의 진입부) ──────────────────────
+  // Redis 관문(DECRBY)으로 티켓을 확보한 즉시 DB에 status=HELD로 '선기록'한다.
+  // (다음 단계에서 큐 워커가 HELD→CONFIRMED로 확정하고 SSE로 알림 — 아직 미구현.)
+  //
+  // 멱등성: 클라이언트가 발급한 idempotencyKey로 재전송을 식별한다.
+  //   - 관문이 INSERT보다 먼저라, 재전송도 DECRBY를 한 번 더 깎는다.
+  //   - HELD INSERT가 (userId, idempotencyKey) unique를 위반하면(P2002) = 재전송.
+  //     → 깎은 재고를 INCRBY로 되돌리고(보상), 첫 요청의 예매를 그대로 성공 응답한다(409 아님).
+  private async createHeld(
+    eventId: number,
+    userId: number,
+    quantity: number,
+    idempotencyKey?: string,
+  ) {
+    if (!idempotencyKey) {
+      throw new BadRequestException('idempotencyKey가 필요합니다.');
+    }
+
+    const key = `stock:event:${eventId}`;
+    const remaining = await this.redis.decrby(key, quantity);
+    if (remaining < 0) {
+      await this.redis.incrby(key, quantity); // 초과분 되돌리기
+      throw new ConflictException('재고가 부족합니다.');
+    }
+
+    try {
+      return await this.prisma.reservation.create({
+        data: {
+          userId,
+          eventId,
+          quantity,
+          idempotencyKey,
+          status: ReservationStatus.HELD,
+        },
+      });
+    } catch (e) {
+      // 재전송(같은 userId+idempotencyKey의 2번째 INSERT) → DB가 원자적으로 거부.
+      if (
+        e instanceof Prisma.PrismaClientKnownRequestError &&
+        e.code === 'P2002'
+      ) {
+        await this.redis.incrby(key, quantity); // 재전송이 깎은 재고 보상
+        return this.prisma.reservation.findUniqueOrThrow({
+          where: { userId_idempotencyKey: { userId, idempotencyKey } },
+        });
+      }
+      throw e;
+    }
   }
 }
