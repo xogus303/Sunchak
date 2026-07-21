@@ -1,15 +1,20 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
+  MessageEvent,
   NotFoundException,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
+import { Observable, defer, from, merge } from 'rxjs';
+import { filter, map, take } from 'rxjs/operators';
 import { Prisma, ReservationStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
+import { ReservationEventsService } from './reservation-events.service';
 import { CONFIRM_QUEUE } from './reservations.constants';
 
 // W2 동시성 비교용 — 예매 재고 차감을 처리하는 5가지 전략.
@@ -27,6 +32,7 @@ export class ReservationsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly redis: RedisService,
+    private readonly events: ReservationEventsService,
     @InjectQueue(CONFIRM_QUEUE) private readonly confirmQueue: Queue,
   ) {}
 
@@ -251,5 +257,63 @@ export class ReservationsService {
       }
       throw e;
     }
+  }
+
+  // ── SSE: 예매 상태 실시간 구독 (W3 파이프라인 ⑥) ────────────────
+  // 남의 예매를 엿보지 못하게, 스트림을 열기 전에 존재·소유권을 확인한다.
+  // (스트림이 열리기 전이라 여기서 던진 예외는 정상 HTTP 404/403이 된다.)
+  async assertOwned(reservationId: number, userId: number): Promise<void> {
+    const reservation = await this.prisma.reservation.findUnique({
+      where: { id: reservationId },
+      select: { userId: true },
+    });
+    if (!reservation) {
+      throw new NotFoundException('예매를 찾을 수 없습니다.');
+    }
+    if (reservation.userId !== userId) {
+      throw new ForbiddenException('본인의 예매만 구독할 수 있습니다.');
+    }
+  }
+
+  /**
+   * 이 예매의 '종료 상태(CONFIRMED 등)'가 정해지는 순간을 흘려보내는 Observable.
+   * NestJS @Sse가 이걸 구독해 그 값을 SSE로 push한다.
+   *
+   * 경합(race) 방지가 핵심 — 파이프라인이 빨라, 클라가 이 스트림을 여는 시점엔
+   * 워커가 '이미' 확정을 끝냈을 수 있다(그럼 미래 방송을 아무리 기다려도 안 옴).
+   * 그래서 두 소스를 merge한다:
+   *   - future$ : 앞으로 올 방송(버스). 아직 HELD면 이걸로 받는다.
+   *   - current$: 구독하는 그 순간의 DB 상태. 이미 종료 상태면 즉시 흘린다(따라잡기).
+   * merge는 소스를 왼쪽→오른쪽 순서로 구독하므로 future$(버스) 구독이 DB 읽기보다
+   * 먼저 성립된다. 워커는 'DB 기록 후 방송'하므로, 둘 사이 틈에서 확정돼도
+   * DB엔 이미 반영돼 current$가 잡거나, 아니면 future$가 방송을 받는다 → 누락 없음.
+   */
+  streamStatus(reservationId: number): Observable<MessageEvent> {
+    // 앞으로 올 방송 중 이 예매 것 → 상태만 뽑는다.
+    const future$ = this.events
+      .ofReservation(reservationId)
+      .pipe(map((e) => e.status));
+
+    // 구독 시점에 DB를 읽어(=defer), 이미 종료 상태면 그 값을 흘린다.
+    // (아직 HELD면 filter가 걸러 아무것도 안 흘림 → 미래 방송을 기다린다.)
+    const current$ = defer(() =>
+      from(
+        this.prisma.reservation.findUnique({
+          where: { id: reservationId },
+          select: { status: true },
+        }),
+      ),
+    ).pipe(
+      filter(
+        (r): r is { status: ReservationStatus } =>
+          !!r && r.status !== ReservationStatus.HELD,
+      ),
+      map((r) => r.status),
+    );
+
+    return merge(future$, current$).pipe(
+      take(1), // 종료 상태 하나 받으면 수도관을 닫는다 → NestJS가 SSE 연결 종료
+      map((status) => ({ data: { reservationId, status } }) as MessageEvent),
+    );
   }
 }

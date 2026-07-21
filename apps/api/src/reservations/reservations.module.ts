@@ -2,6 +2,8 @@ import { Module } from '@nestjs/common';
 import { BullModule } from '@nestjs/bullmq';
 import { ReservationsService } from './reservations.service';
 import { ReservationsController } from './reservations.controller';
+import { ReservationStreamController } from './reservation-stream.controller';
+import { ReservationEventsService } from './reservation-events.service';
 import { ConfirmProcessor } from './confirm.processor';
 import { CONFIRM_QUEUE } from './reservations.constants';
 
@@ -22,7 +24,7 @@ import { CONFIRM_QUEUE } from './reservations.constants';
       },
     }),
   ],
-  controllers: [ReservationsController],
-  providers: [ReservationsService, ConfirmProcessor],
+  controllers: [ReservationsController, ReservationStreamController],
+  providers: [ReservationsService, ReservationEventsService, ConfirmProcessor],
 })
 export class ReservationsModule {}

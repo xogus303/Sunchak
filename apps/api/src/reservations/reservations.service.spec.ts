@@ -4,9 +4,11 @@ import { BullModule, getQueueToken } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { BadRequestException, ConflictException } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
+import { firstValueFrom } from 'rxjs';
 import { ReservationsService } from './reservations.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
+import { ReservationEventsService } from './reservation-events.service';
 import { ConfirmProcessor } from './confirm.processor';
 import { CONFIRM_QUEUE } from './reservations.constants';
 
@@ -73,6 +75,7 @@ describe('ReservationsService (통합 — held 흐름)', () => {
         ReservationsService,
         PrismaService,
         RedisService,
+        ReservationEventsService,
         ConfirmProcessor,
       ],
     }).compile();
@@ -209,6 +212,62 @@ describe('ReservationsService (통합 — held 흐름)', () => {
       });
       expect(r?.status).toBe('CONFIRMED'); // 바뀐 것 없음
       await expect(prisma.reservation.count()).resolves.toBe(1);
+    });
+  });
+
+  describe('SSE 상태 스트림', () => {
+    it('방송국은 구독자가 지정한 예약번호의 이벤트만 걸러 전달한다', async () => {
+      const events = moduleRef.get(ReservationEventsService);
+
+      // 1번을 구독해두고(먼저 subscribe), 2번→1번 순서로 방송하면 1번만 받아야 한다.
+      const received = firstValueFrom(events.ofReservation(1));
+      events.publish({ reservationId: 2, status: 'CONFIRMED' });
+      events.publish({ reservationId: 1, status: 'CONFIRMED' });
+
+      await expect(received).resolves.toEqual({
+        reservationId: 1,
+        status: 'CONFIRMED',
+      });
+    });
+
+    it('구독 시점에 이미 CONFIRMED면 즉시 그 상태를 흘려보낸다(따라잡기)', async () => {
+      await seedStock(5);
+      const reservation = await service.create(
+        eventId,
+        userId,
+        1,
+        'held',
+        randomUUID(),
+      );
+      await waitForStatus(reservation.id, 'CONFIRMED'); // 워커가 먼저 확정을 끝냄
+
+      // 확정이 지나간 뒤 구독해도 current$(DB 조회)가 곧바로 CONFIRMED를 흘려야 한다.
+      const msg = await firstValueFrom(service.streamStatus(reservation.id));
+
+      expect(msg.data).toEqual({
+        reservationId: reservation.id,
+        status: 'CONFIRMED',
+      });
+    });
+
+    it('HELD 접수 직후 구독하면 워커 확정이 스트림으로 흘러온다', async () => {
+      await seedStock(5);
+      const reservation = await service.create(
+        eventId,
+        userId,
+        1,
+        'held',
+        randomUUID(),
+      );
+      expect(reservation.status).toBe('HELD'); // 구독 시작 시점엔 아직 HELD
+
+      // 아직 HELD일 때 구독 → 워커가 확정하면 future$(방송)로 CONFIRMED가 흘러온다.
+      const msg = await firstValueFrom(service.streamStatus(reservation.id));
+
+      expect(msg.data).toEqual({
+        reservationId: reservation.id,
+        status: 'CONFIRMED',
+      });
     });
   });
 });

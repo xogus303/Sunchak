@@ -3,6 +3,7 @@ import { Logger } from '@nestjs/common';
 import { Job } from 'bullmq';
 import { ReservationStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { ReservationEventsService } from './reservation-events.service';
 import { CONFIRM_QUEUE } from './reservations.constants';
 
 // job 페이로드 — 예매 내용 전체가 아니라 '가리키는 포인터'(id)만 담는다.
@@ -25,7 +26,10 @@ interface ConfirmJobData {
 export class ConfirmProcessor extends WorkerHost {
   private readonly logger = new Logger(ConfirmProcessor.name);
 
-  constructor(private readonly prisma: PrismaService) {
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly events: ReservationEventsService,
+  ) {
     super();
   }
 
@@ -40,6 +44,15 @@ export class ConfirmProcessor extends WorkerHost {
     if (count === 0) {
       // 이미 CONFIRMED(재시도·중복 job)거나 EXPIRED(TTL 회수됨) → 확정할 게 없음.
       this.logger.debug(`예매 ${reservationId}: HELD 아님 → 확정 건너뜀(멱등 no-op)`);
+      return;
     }
+
+    // '진짜로 이번에 확정된' 경우에만 방송한다(count>0). 중복 job·이미 확정은
+    // 위에서 걸러졌으므로 여기까지 오면 상태가 방금 HELD→CONFIRMED로 바뀐 것이다.
+    // → SSE로 열려 대기 중인 클라이언트에게 이 방송이 흘러간다.
+    this.events.publish({
+      reservationId,
+      status: ReservationStatus.CONFIRMED,
+    });
   }
 }

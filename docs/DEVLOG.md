@@ -234,3 +234,37 @@
 - **테스트**: 통합 4→6. 추가 2 = ①held 접수 후 워커가 CONFIRMED로 확정(폴링 대기) ②이미 CONFIRMED에 확정 job 중복 투입해도 1건 유지(워커 멱등). 테스트 모듈에 실 BullMQ 인프라+ConfirmProcessor 등록해 end-to-end(실 DB/Redis). **전체 14개 그린.**
 - **삽질 2건**: ①`pnpm exec`가 실행 전 deps 점검을 하는데 `msgpackr-extract`(bullmq 선택적 네이티브 최적화) 빌드 스킵을 정책 위반으로 봐 tsc/jest가 막힘 → `./node_modules/.bin/`으로 직접 호출해 우회. 기능엔 무해(JS 폴백). ②이 기기 로컬 DB(docker 볼륨, 기기별)에 마이그레이션 미적용이라 `idempotencyKey 컬럼 없음` 런타임 에러 + Prisma Client도 stale → `prisma generate` + `prisma migrate deploy`로 해결. (STATUS의 "적용 완료"는 다른 기기 얘기였음.)
 - **다음**: 2.4 SSE(확정 실시간 push) → 2.5 안전장치(TTL 회수 + Redis 재구성).
+
+## 2026-07-21 · 공개 데모 모드 설계 (ADR 0016)
+
+- **동기(사용자 질문에서 출발)**: "최종 형태가 포트폴리오로, 누구나 실시간 티케팅/순번을 테스트해볼 수 있나?" → 두 리스크 발견. ① 핵심 가치(초과판매 0·실시간 순번)는 방문자 **혼자 클릭으론 체감 불가** → 데모 장치 필요. ② 공개 URL이 **무료 티어(Neon/VM)** 위라 봇·시뮬 남발이 한도를 태움 → 진입 통제 필요.
+- **사용자 결정 2건**: 진입 통제 = **게이트 + 시뮬 상한**(게이트만/전면 rate limit 아님). 리셋 = **자동 주기 + 수동 버튼 둘 다**(자동만/수동만/방문자별 격리 아님).
+- **설계 확정(ADR 0016)** 세 축 + 한도 보호:
+  - **A. 진입 게이트**: 공유 비번(env) → 서버가 데모 토큰 발급 → API가 검사. **게이트는 반드시 API 계층**(프론트 게이트만이면 봇이 VM API 직격 — 무료 티어 부하는 백엔드에서 나므로 신뢰 경계도 백엔드). **게이트 ≠ 로그인**(진입 차단 vs 신원 식별, 층위 다른 별개 막). 비번은 포트폴리오에 공개.
+  - **B. 데모 장치**: ① 서버측 부하 시뮬(가상 유저 N명 → 순번·재고 소진 실시간 재현) ② 실시간 판매 대시보드(SSE stats) ③ 리셋.
+  - **C. 리셋**: 자동 주기(스케줄러) + 수동 버튼. seed 미비(STATUS의 알려진 틈)를 여기서 함께 해소.
+  - **D. 한도 보호**: 시뮬 상한(최대 VU) + 쿨다운(Redis rate limit, 429).
+- **설계상 연결고리**: 데모 대시보드의 stats 스트림 = **W3 2.4 SSE와 같은 메커니즘** → 2.4 SSE 설계 때 "확정 push"뿐 아니라 "stats 스트림"도 염두에 두기로(STATUS 다음 할 일에 명시).
+- **구현 시점**: W4(배포와 함께). 이번엔 설계·문서만.
+- **반영 파일**: ADR 0016 신규 + decisions/README 인덱스 + 로드맵(01) W4·성공기준 + 기획안(02) §12·화면정의 + `.env.example` 키 4개(`DEMO_GATE_PASSWORD`·`DEMO_SIM_MAX_VU`·`DEMO_SIM_COOLDOWN_MS`·`DEMO_RESET_INTERVAL_MS`) + STATUS.
+- **다음**: 예정대로 W3 2.4 SSE(확정 push + stats 스트림 대비).
+
+## 2026-07-22 · W3 2.4 — SSE로 확정 실시간 push
+
+- **개념 선(先)정리(사용자 자기설명 검증, 집요하게)** — 코드 전에 "왜 SSE인가"부터:
+  - **문제 체감**: 사용자는 HELD 응답 받고 떠나는데 CONFIRMED는 그 뒤 워커가 비동기로 뒤집음 → 이미 응답받은 클라에 서버가 어떻게 알리나? HTTP는 클라가 물어야 답하는 구조라 서버가 먼저 말 못 검.
+  - **폴링/WebSocket/SSE 비교**: 폴링=낭비+타이밍, WebSocket=양방향이라 오버스펙, **SSE=서버→클라 단방향 push + HTTP 그대로 + EventSource 자동 재연결**. 우리 요구(단방향 상태 push)에 정확히 맞음. 사용자 3문항 자기설명 통과.
+  - **날카로운 질문 2건(사용자 발)**: ① "왜 워커의 CONFIRMED를 받아야? 결제 완료만 받으면 되지 않나" → **CONFIRMED가 곧 '결제 완료된 확정'**. 지금 워커 즉시 flip은 결제 stub. 실제론 결제 확정이 사용자 요청과 **분리된 경로(PG 웹훅)** 로 와서 서버가 먼저 알려야 함 → SSE 정당. ② "confirm job이 큐에서 웹훅을 기다리나?" → **아니오, 안티패턴**. job은 "지금 할 수 있는 일"만. 실제 설계선 createHeld에서 enqueue 안 하고 **웹훅 도착이 confirm job을 태움**. 워커는 기다린 적 없음. 지금 createHeld enqueue는 "결제 즉시 성공" 흉내며, 결제 붙으면 enqueue 위치만 웹훅으로 옮기면 됨(워커 코드 불변).
+  - **핵심 개념(방송국)**: 워커와 SSE 통로는 서로 **참조 없는(loose coupling)** 별개 실행 맥락 → 값 직접 못 넘김 → 프로세스 내 **이벤트 버스**를 경유. RxJS `Subject`=방송국(next 송출+subscribe 수신), `Observable`=시간에 걸쳐 흘러오는 값의 수도관(Promise=값1개 vs Observable=여러개, subscribe≈addEventListener). NestJS `@Sse`는 내가 반환한 Observable을 구독해 emit을 `data:...\n\n` 전선포맷으로 변환·flush·연결관리. **내 책임 경계 = Observable 출구까지**, 그 뒤 전송은 NestJS.
+  - **정직한 한계 명시**: 인메모리 Subject라 워커=웹서버 같은 프로세스일 때만 통함. 별도 프로세스 분리 시 Redis pub/sub 필요(운영 관심사, 후순위).
+- **구현**:
+  - **신규 `reservation-events.service.ts`**: `private Subject<ReservationStatusEvent>` + `publish()`(next) + `ofReservation(id)`(filter로 그 예약만 거른 구독전용 Observable). Subject를 숨기고 구독 스트림만 노출(외부 next 차단).
+  - **워커(`confirm.processor.ts`)**: `updateMany` 후 **`count>0`(진짜 이번에 확정)일 때만** `events.publish({id, CONFIRMED})`. count===0(중복/이미확정)은 return — 헛 신호 방지.
+  - **서비스(`reservations.service.ts`)**: `assertOwned`(스트림 열기 전 존재·소유권 확인 → 404/403) + `streamStatus`(경합 방지 핵심).
+  - **신규 `reservation-stream.controller.ts`**: `@Controller('reservations')` + `@Sse(':reservationId/stream')` async 핸들러 = `await assertOwned` 후 `streamStatus` 반환. URL `/reservations/:id/stream`(create는 events 하위라 경로 달라 별도 컨트롤러).
+- **경합(race) 처리 — 이번 설계의 정수**: 파이프라인이 빨라 클라가 SSE 여는 시점엔 워커가 **이미 확정 끝냈을 수** 있음(미래 방송만 기다리면 영영 안 옴). → `merge(future$, current$)`: future$=버스 방송(아직 HELD면 이걸로), current$=`defer`로 **구독 순간 DB 조회**해 이미 종료상태면 즉시 흘림(따라잡기). merge가 future$부터 구독 → 버스 구독이 DB읽기보다 먼저 성립 + 워커는 "DB기록 후 방송" 순서 → 틈에서 확정돼도 current$가 잡거나 future$가 받음(누락 0). `take(1)`로 종료상태 1건 받으면 수도관 close → NestJS가 연결 종료.
+- **검증(무거운 e2e 대신 소스로 확정)**: `async @Sse` 핸들러가 안전한지 NestJS 11.1.28 `router-response-controller.js` 확인 — `Promise.resolve(result).then(구독)` + `.catch(reject)`. 정상 경로는 Promise 풀어 구독, 예외(assertOwned throw)는 헤더 전송 전이라 예외필터가 정상 404/403으로 변환. → HTTP e2e 불필요 판단(seed 미비로 수동 e2e 비쌈).
+- **테스트**: 통합 6→9. 추가 3 = ①버스 필터링(지정 예약번호 이벤트만 전달) ②이미 CONFIRMED면 구독 즉시 따라잡기(current$) ③HELD 접수 직후 구독 시 워커 확정이 스트림으로 흘러옴(future$/current$). `firstValueFrom`으로 Observable 첫 emit 검증. **전체 14→17 그린.**
+- **삽질**: 이 기기에 `@nestjs/bullmq`·`bullmq` 미설치(fresh) → tsc가 그 두 모듈만 에러(내 신규 코드는 무에러) → `pnpm install`로 해소. Docker 데몬 꺼져 있어 `open -a Docker`로 기동 후 infra up.
+- **정직한 남은 틈(2.4에서 의도적으로 안 함)**: ① 브라우저 `EventSource`는 `Authorization` 헤더 못 붙임 → 지금 JWT 가드 유지라 실제 프론트 붙일 때(W3 후반) 쿼리파라미터 토큰/쿠키로 해결 필요. ② 하트비트 없음(프록시 유휴 끊김) → 운영 관심사 후순위. ③ ADR 0016 데모 stats 스트림도 같은 @Sse+Observable 메커니즘이라 재사용 가능(이번에 일반 배관을 만들어둠).
+- **다음**: 2.5 안전장치(HELD TTL 만료 회수 = 고아 안전망 + `heldUntil` 실제 세팅 + Redis 유실 재구성).
