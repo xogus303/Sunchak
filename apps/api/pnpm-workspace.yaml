@@ -4,3 +4,4 @@ allowBuilds:
   prisma: true
   argon2: true
   unrs-resolver: false
+  msgpackr-extract: false

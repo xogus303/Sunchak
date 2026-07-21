@@ -1,10 +1,14 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { ConfigModule } from '@nestjs/config';
+import { ConfigModule, ConfigService } from '@nestjs/config';
+import { BullModule, getQueueToken } from '@nestjs/bullmq';
+import { Queue } from 'bullmq';
 import { BadRequestException, ConflictException } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { ReservationsService } from './reservations.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
+import { ConfirmProcessor } from './confirm.processor';
+import { CONFIRM_QUEUE } from './reservations.constants';
 
 // held 흐름은 '실제' DB의 unique 제약(P2002)과 '실제' Redis DECRBY 원자성이 핵심이라
 // mock으로는 검증이 무의미하다. 로컬 Postgres/Redis에 붙는 통합 테스트로 짠다.
@@ -23,12 +27,56 @@ describe('ReservationsService (통합 — held 흐름)', () => {
   const seedStock = (qty: number) => redis.set(stockKey(), String(qty));
   const readStock = async () => Number(await redis.get(stockKey()));
 
+  // 워커는 비동기라, 예매가 목표 상태가 될 때까지 폴링한다(최대 timeoutMs).
+  const waitForStatus = async (id: number, status: string, timeoutMs = 3000) => {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const r = await prisma.reservation.findUnique({ where: { id } });
+      if (r?.status === status) return r;
+      await new Promise((res) => setTimeout(res, 50));
+    }
+    throw new Error(`timeout: 예매 ${id}가 ${timeoutMs}ms 내 ${status}가 되지 않음`);
+  };
+
   beforeAll(async () => {
     moduleRef = await Test.createTestingModule({
-      imports: [ConfigModule.forRoot({ isGlobal: true })],
-      providers: [ReservationsService, PrismaService, RedisService],
+      imports: [
+        ConfigModule.forRoot({ isGlobal: true }),
+        // held가 큐에 job을 넣고 실제 워커가 확정하는 end-to-end를 검증하려면
+        // 실제 BullMQ(실 Redis) 인프라가 필요하다. app.module과 같은 연결 설정을 쓴다.
+        BullModule.forRootAsync({
+          inject: [ConfigService],
+          useFactory: (config: ConfigService) => {
+            const url = new URL(
+              config.get<string>('REDIS_URL') ?? 'redis://localhost:6379',
+            );
+            return {
+              connection: {
+                host: url.hostname,
+                port: Number(url.port) || 6379,
+              },
+            };
+          },
+        }),
+        BullModule.registerQueue({
+          name: CONFIRM_QUEUE,
+          defaultJobOptions: {
+            attempts: 3,
+            backoff: { type: 'exponential', delay: 1000 },
+            removeOnComplete: true,
+            removeOnFail: false,
+          },
+        }),
+      ],
+      // ConfirmProcessor(워커)까지 등록해야 job이 실제로 처리된다.
+      providers: [
+        ReservationsService,
+        PrismaService,
+        RedisService,
+        ConfirmProcessor,
+      ],
     }).compile();
-    await moduleRef.init(); // onModuleInit 실행 → Prisma/Redis 연결
+    await moduleRef.init(); // onModuleInit + onApplicationBootstrap → Prisma/Redis 연결 + 워커 기동
 
     service = moduleRef.get(ReservationsService);
     prisma = moduleRef.get(PrismaService);
@@ -118,6 +166,49 @@ describe('ReservationsService (통합 — held 흐름)', () => {
       await expect(
         service.create(eventId, userId, 1, 'held'),
       ).rejects.toBeInstanceOf(BadRequestException);
+    });
+  });
+
+  describe('확정(워커 HELD→CONFIRMED)', () => {
+    it('held 접수 후 워커가 예매를 CONFIRMED로 확정한다', async () => {
+      await seedStock(5);
+
+      const reservation = await service.create(
+        eventId,
+        userId,
+        1,
+        'held',
+        randomUUID(),
+      );
+      expect(reservation.status).toBe('HELD'); // 접수 시점엔 아직 HELD
+
+      const confirmed = await waitForStatus(reservation.id, 'CONFIRMED');
+      expect(confirmed.status).toBe('CONFIRMED');
+      await expect(prisma.reservation.count()).resolves.toBe(1);
+    });
+
+    it('이미 CONFIRMED인 예매에 확정 job이 또 들어와도 그대로 1건이다(워커 멱등)', async () => {
+      await seedStock(5);
+
+      const reservation = await service.create(
+        eventId,
+        userId,
+        1,
+        'held',
+        randomUUID(),
+      );
+      await waitForStatus(reservation.id, 'CONFIRMED');
+
+      // 확정된 예매에 같은 job을 한 번 더 투입 → updateMany(WHERE status=HELD)가 0건(no-op).
+      const queue = moduleRef.get<Queue>(getQueueToken(CONFIRM_QUEUE));
+      await queue.add('confirm', { reservationId: reservation.id });
+      await new Promise((res) => setTimeout(res, 300)); // 처리 여유
+
+      const r = await prisma.reservation.findUnique({
+        where: { id: reservation.id },
+      });
+      expect(r?.status).toBe('CONFIRMED'); // 바뀐 것 없음
+      await expect(prisma.reservation.count()).resolves.toBe(1);
     });
   });
 });

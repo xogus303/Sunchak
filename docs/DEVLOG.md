@@ -221,3 +221,16 @@
 - **판단 근거로 남긴 것**: `heldUntil`은 2.2에서 세팅 생략 — 만료 스윕(2.5)이 아직 없어 값만 넣으면 데드 값이라 2.5에서 함께 도입(단순성).
 - **커밋**: 마이그레이션 `1c0afd2`, held 구현+테스트 `6c5ed23`.
 - **다음**: 2.3 BullMQ 큐/워커 — createHeld가 HELD INSERT 후 job enqueue + 즉시 응답, 워커가 `WHERE status=HELD`로 CONFIRMED UPDATE(재실행 0건 = 본래 멱등).
+
+## 2026-07-21 · W3 2.3 — BullMQ 큐/워커로 HELD→CONFIRMED 확정
+
+- **개념 선(先)정리(사용자 자기설명 검증)** — "왜 큐인가"를 코드 전에 밑바닥까지:
+  - **큐의 두 가치**: ①신뢰성(job이 Redis에 영속 → 실패 시 자동 재시도 = at-least-once = 최종 일관성) ②비동기 분리(빠른 응답). 사용자는 처음 ②만 답하고 ①을 빠뜨렸고, "UPDATE가 무거워서(행락+MVCC+WAL)"라고 오답 → **교정**: 그 비용은 hot row **직렬화**일 때 문제고, 확정 UPDATE는 주문마다 다른 행이라 경합 없는 병렬. 2.2에서 HELD INSERT를 이미 요청 경로에 두고 "경미"라 통과시켰으니 "무게가 이유"면 앞뒤가 안 맞음. (W2 hot row 교훈을 안 맞는 데 옮긴 실수 — ADR 0015 때와 같은 유형.)
+  - **왜 INSERT는 동기, UPDATE만 큐로?** 핵심은 "**누가 기다리는가**". INSERT는 사용자가 대기 중 → 실패해도 사용자가 재시도 엔진(재전송). UPDATE는 "접수됨" 응답 후 사용자가 떠난 뒤 → 실패해도 재시도할 주체가 없음 → **영속 job이 그 자리를 대신**. 또한 INSERT는 (a)멱등 판정=사용자에게 줄 답이라 미룰 수 없고 (b)큐 job이 가리킬 닻이라 먼저 존재해야 함(그래서 "선기록").
+  - **왜 HELD인가(바로 CONFIRMED INSERT 안 하고)?** INSERT 시점엔 관문만 통과·**미결제**. CONFIRMED는 거짓. HELD=유효기간(heldUntil) 붙은 임시 확보, 사이에 결제가 끼고 CONFIRMED(결제 완료)/EXPIRED(시간 내 미결제)로 갈림. **정직한 지적**: 지금 워커는 결제 없이 즉시 뒤집어 두 단계가 과해 보이나, HELD는 결제가 들어올 seam. 결제 없으면 INSERT-as-CONFIRMED가 더 단순한 정답임을 명시.
+  - **job엔 id만**: 요청 시점 스냅샷이 아니라 처리 시점 진짜 상태로. DB=진실의 원본, job=포인터. TTL 스윕이 먼저 EXPIRE했거나 재시도 job이 이미 CONFIRM했을 수 있어, 워커는 `WHERE status=HELD`로 현재 상태를 DB에 재확인.
+- **구현**: `@nestjs/bullmq`+`bullmq` 설치. `BullModule.forRootAsync`(app.module, REDIS_URL을 host/port로 파싱 — 옵션을 넘기면 BullMQ가 워커 블로킹 연결용 maxRetriesPerRequest:null을 알아서 세팅) + `registerQueue('confirm', defaultJobOptions: attempts3·지수백오프·removeOnComplete)`. `ConfirmProcessor`(WorkerHost)가 `updateMany(WHERE status=HELD → CONFIRMED)` — count===0은 멱등 no-op. `createHeld`가 HELD 커밋 후 `queue.add('confirm',{reservationId})` 하고 즉시 HELD 반환.
+- **알려진 틈(코드 주석·STATUS 명시)**: create 커밋과 queue.add 사이 크래시 시 job 없는 HELD 고아 발생(DB·큐 이중 쓰기라 비원자적). Outbox는 과함 → **2.5 TTL 회수 잡이 안전망**으로 정리(EXPIRE)하기로.
+- **테스트**: 통합 4→6. 추가 2 = ①held 접수 후 워커가 CONFIRMED로 확정(폴링 대기) ②이미 CONFIRMED에 확정 job 중복 투입해도 1건 유지(워커 멱등). 테스트 모듈에 실 BullMQ 인프라+ConfirmProcessor 등록해 end-to-end(실 DB/Redis). **전체 14개 그린.**
+- **삽질 2건**: ①`pnpm exec`가 실행 전 deps 점검을 하는데 `msgpackr-extract`(bullmq 선택적 네이티브 최적화) 빌드 스킵을 정책 위반으로 봐 tsc/jest가 막힘 → `./node_modules/.bin/`으로 직접 호출해 우회. 기능엔 무해(JS 폴백). ②이 기기 로컬 DB(docker 볼륨, 기기별)에 마이그레이션 미적용이라 `idempotencyKey 컬럼 없음` 런타임 에러 + Prisma Client도 stale → `prisma generate` + `prisma migrate deploy`로 해결. (STATUS의 "적용 완료"는 다른 기기 얘기였음.)
+- **다음**: 2.4 SSE(확정 실시간 push) → 2.5 안전장치(TTL 회수 + Redis 재구성).

@@ -5,9 +5,12 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
+import { InjectQueue } from '@nestjs/bullmq';
+import { Queue } from 'bullmq';
 import { Prisma, ReservationStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
+import { CONFIRM_QUEUE } from './reservations.constants';
 
 // W2 동시성 비교용 — 예매 재고 차감을 처리하는 5가지 전략.
 // + W3 최종 흐름(held): 관문(DECRBY) + HELD 선기록 + 멱등성 보상.
@@ -24,6 +27,7 @@ export class ReservationsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly redis: RedisService,
+    @InjectQueue(CONFIRM_QUEUE) private readonly confirmQueue: Queue,
   ) {}
 
   // 낙관적 락 재시도 상한.
@@ -218,7 +222,7 @@ export class ReservationsService {
     }
 
     try {
-      return await this.prisma.reservation.create({
+      const reservation = await this.prisma.reservation.create({
         data: {
           userId,
           eventId,
@@ -227,6 +231,13 @@ export class ReservationsService {
           status: ReservationStatus.HELD,
         },
       });
+
+      // HELD가 DB에 커밋된 뒤 확정 job을 큐에 투입한다(워커가 이 id를 가리켜 CONFIRMED로).
+      // job엔 id만 — 나머지는 워커가 처리 시점에 DB에서 직접 읽는다.
+      // (알려진 틈: create 커밋과 add 사이 크래시 시 job 없는 HELD가 남는다.
+      //  DB·큐 이중 쓰기라 원자적이지 않음 → 2.5의 TTL 회수 잡이 안전망으로 정리한다.)
+      await this.confirmQueue.add('confirm', { reservationId: reservation.id });
+      return reservation;
     } catch (e) {
       // 재전송(같은 userId+idempotencyKey의 2번째 INSERT) → DB가 원자적으로 거부.
       if (
