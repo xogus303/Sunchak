@@ -64,6 +64,7 @@ model Event {
   price       Int // 원(KRW) 정수. 통화 최소단위로 저장 — Float 금지(부동소수 오차).
   openAt      DateTime // 티켓 오픈 시각
   status      EventStatus @default(UPCOMING)
+  isDemo      Boolean     @default(false) // W4 공개 데모 모드(ADR 0016)가 리셋 대상을 식별하는 표식
   createdAt   DateTime    @default(now())
   updatedAt   DateTime    @updatedAt
 

@@ -5,7 +5,7 @@
 > - **세션 시작 시**: 이 파일을 가장 먼저 읽고 "다음 할 일"부터 이어간다.
 > - **세션 끝 / 커밋 전**: 이 파일을 **덮어써서** 최신 상태로 갱신한다. (시간순 이력·삽질은 `DEVLOG.md`, 결정 근거는 `decisions/`)
 
-**마지막 업데이트:** 2026-08-01 (**W3 2.5 안전장치(HELD TTL 만료 회수 + Redis 재구성) 구현·검증 완료 — W3 전체 완료**. **다음은 W4 공개 데모 모드**)
+**마지막 업데이트:** 2026-08-01 (**W3 전체 완료 + W4 착수: 데이터 리셋+seed 구현·검증 완료**. **다음은 W4 진입 게이트**)
 
 ---
 
@@ -37,26 +37,36 @@
   - **구현**: `HELD_TTL_MS`(5분, `reservations.service.ts`) + `createHeld`가 `heldUntil` 실제 세팅(2.2/2.3에선 생략했던 부분). 신규 `sweep.processor.ts`(30초 주기, `$queryRaw`로 원자적 EXPIRE + eventId별 합산 `INCRBY`), 신규 `reconcile.processor.ts`(1분 주기, Prisma `groupBy`로 `총재고−(HELD+CONFIRMED)` 계산 후 이벤트별 `SET`). 둘 다 `OnModuleInit`에서 자기 큐에 스스로를 `repeat` 등록(confirm과 달리 외부 producer 없음).
   - **삽질**: 통합 테스트 파일이 3개(reservations/sweep/reconcile)로 늘며 Jest 기본 병렬 실행이 같은 로컬 DB를 공유하는 파일들의 `beforeEach` 전체삭제를 서로 밟음 → `package.json` jest 설정에 **`maxWorkers: 1`** 추가(직렬 실행)로 해결.
   - **테스트**: 신규 2파일(sweep 3건 + reconcile 4건). **전체 17→24 그린.**
+- **✅ W4 착수 — 데이터 리셋 + seed 구현·검증 완료 (2026-08-01, ADR 0016 축 C 부분 개정)**: STATUS의 오래된 "seed 없음" 틈을 해소.
+  - **범위 조정**: 자동 주기/활동기반 리셋은 이번에 드롭 — **수동 리셋만**(`POST /demo/reset`). 필요해지면 나중에 추가(ADR 0016 개정 이력 참고).
+  - **데모 이벤트 식별**: `Event.isDemo Boolean` 추가(마이그레이션 완료) — 로컬의 다른 테스트 이벤트와 안 섞이게.
+  - **구현**: 신규 `demo/` 모듈. `DemoService.resetDemoEvent()`(예매 삭제→재고/Redis 원복→openAt·status 리셋)를 `prisma/seed.ts`(idempotent, 없으면만 생성)와 `POST /demo/reset` 엔드포인트가 공유. 리셋 엔드포인트는 **아직 가드 없음**(진입 게이트가 다음 작업이라 그때 보호 예정, 코드 주석에 명시).
+  - **테스트**: 신규 `demo.service.spec.ts` 4건. **전체 24→28 그린.** curl로 실제 HTTP 경로도 수동 검증.
 
 ## 🔨 진행 중 / 막힌 것
-- (막힌 것 없음. W3 전체 완료.)
-- **⚠️ seed 스크립트가 없다**: DB가 비어 있어(admin·이벤트 없음) `held`를 **수동 e2e**로 돌리려면 회원가입·이벤트 생성이 선행돼야 한다. (통합 테스트는 setup에서 자체 생성하므로 무관.) 수동 확인이 잦아지면 seed 도입 고려. (**W4 데모 리셋에서 함께 해소 예정**.)
+- (막힌 것 없음.)
+- **⚠️ `POST /demo/reset`이 아직 무방비 상태**: 진입 게이트 구현 전까지는 인증·인가 없이 누구나 호출 가능(로컬 개발 단계라 당장 위험 없음, 배포 전 반드시 게이트로 보호해야 함).
 - 장시간 테스트 시 JWT(1h) 만료 주의 → 재로그인으로 토큰 갱신.
 
 ## ▶️ 다음 할 일 (이 순서로)
-1. ✅ ~~W1~~ / ✅ ~~W2 + ADR 0014~~ / ✅ ~~W3 설계 + ADR 0015~~ / ✅ ~~스키마 변경~~ / ✅ ~~마이그레이션~~ / ✅ ~~2.2 HELD 선기록 + 멱등성 보상~~ / ✅ ~~2.3 BullMQ 큐/워커 확정~~ / ✅ ~~2.4 SSE 확정 push~~ / ✅ ~~2.5 안전장치(TTL 회수 + Redis 재구성)~~ — **W3 전체 완료.**
-2. **W4 공개 데모 모드 (ADR 0016)** — 배포와 함께: 진입 게이트(가드+데모 토큰) + 서버측 부하 시뮬(상한·쿨다운) + 실시간 stats 대시보드(2.4 SSE 배관 재사용) + 데이터 리셋(자동 주기+수동). **seed/리셋 로직을 여기서 정비**(위 seed 항목 흡수).
-3. (선택) `Payment.idempotencyKey`도 단독 unique — 같은 유출 문제 가능. W3 결제 단계에서 재검토.
+1. ✅ ~~W1~~ / ✅ ~~W2 + ADR 0014~~ / ✅ ~~W3 전체(설계+2.2~2.5) + ADR 0015~~ / ✅ ~~W4 데이터 리셋+seed~~ — 여기까지 완료.
+2. **W4 진입 게이트 (ADR 0016 축 A)** — `DEMO_GATE_PASSWORD` 검증 API + 단기 데모 토큰 발급 + 전역 가드. **`POST /demo/reset`을 포함해 API 전체를 이 가드로 보호**(현재 무방비 상태 해소).
+3. **W4 서버측 부하 시뮬레이션 (축 B-1)** — 가상 유저 N명 투입 엔드포인트 + 상한(`DEMO_SIM_MAX_VU`)·쿨다운(Redis, `DEMO_SIM_COOLDOWN_MS`).
+4. **W4 실시간 stats 대시보드 (축 B-2)** — 2.4의 `@Sse`+`Subject` 배관 재사용, 재고/HELD/CONFIRMED/큐 적체 스트리밍.
+5. **W4 프론트엔드(apps/web)** — 게이트 화면 + 데모 컨트롤 화면. 백엔드 조각들이 갖춰진 뒤("서버 먼저" 원칙).
+6. **배포** — Neon(이미 있음)·무료/저가 VM·Vercel 등.
+7. (선택) `Payment.idempotencyKey`도 단독 unique — 같은 유출 문제 가능. 결제 단계에서 재검토(아직 Payment API 자체가 미구현).
 
 ## 🖥️ 이 기기(현재) 로컬 환경 — 재세팅 시 주의
 - **Node 버전**: 활성 `node`가 v22.12.0이면 pnpm(v22.13+ 요구)이 거부한다. **nvm의 v22.23.1 사용**: 명령 앞에 `export PATH="$HOME/.nvm/versions/node/v22.23.1/bin:$PATH"` 붙이거나 `nvm use v22.23.1`.
 - **`.env`는 gitignore라 기기마다 새로 만든다**(이 기기엔 없어서 재생성함). 로컬 W2/W3용 값: `DATABASE_URL=postgresql://sunchak:sunchak@localhost:5432/sunchak?schema=public`, `REDIS_URL=redis://localhost:6379`, `JWT_SECRET`(로컬 임의값), `PORT=3001`. (docker-compose 계정과 일치.)
 - **인프라 기동**: `cd infra && docker compose up -d --wait postgres redis`.
-- **마이그레이션**: `migrate dev`는 대화형이라 비대화형(에이전트) 환경에서 막힌다. 우회 = `prisma migrate diff --from-url <DB> --to-schema-datamodel prisma/schema.prisma --script > migration.sql` → `prisma migrate deploy` → `prisma generate`. (사람이 직접 터미널에서 하면 `migrate dev`가 정상.)
+- **마이그레이션**: `migrate dev`는 대화형이라 비대화형(에이전트) 환경에서 막힌다. 우회(더 간단, 2026-08-01 확인) = `prisma migrate dev --name <이름> --create-only`(SQL만 생성, 적용 안 함) → `prisma migrate deploy` → `prisma generate`. (사람이 직접 터미널에서 하면 `migrate dev`가 정상.)
+- **seed 스크립트 실행**: `prisma db seed`가 내부적으로 `ts-node`를 PATH에서 찾는데, `./node_modules/.bin/prisma`처럼 바이너리를 직접 호출하면 PATH에 `node_modules/.bin`이 없어 `ENOENT` 에러가 난다. `export PATH="$(pwd)/node_modules/.bin:$PATH"`를 먼저 붙이거나 `pnpm exec prisma db seed` 사용.
 
 ## 🧪 테스트 실행법
-- `cd apps/api && pnpm exec jest`(전체 24개) 또는 `pnpm exec jest reservations`(held+SSE+sweep+reconcile 통합 16개). 사전조건: 로컬 PG·Redis 기동.
-- ⚠️ 실DB를 쓰는 통합 스펙 파일이 여러 개(reservations/sweep/reconcile)라 **`maxWorkers: 1`(package.json jest 설정)로 직렬 실행** — 병렬 실행 시 서로의 `beforeEach` 전체삭제가 충돌한다(2.5에서 발견).
+- `cd apps/api && pnpm exec jest`(전체 28개) 또는 `pnpm exec jest reservations`(held+SSE+sweep+reconcile 통합 16개). 사전조건: 로컬 PG·Redis 기동.
+- ⚠️ 실DB를 쓰는 통합 스펙 파일이 여러 개(reservations/sweep/reconcile/demo)라 **`maxWorkers: 1`(package.json jest 설정)로 직렬 실행** — 병렬 실행 시 서로의 `beforeEach` 전체삭제가 충돌한다(2.5에서 발견).
 - ⚠️ **`pnpm exec`가 막히면**: bullmq의 선택적 네이티브 빌드(`msgpackr-extract`)가 스킵돼 pnpm의 실행 전 deps 점검이 실패할 수 있다. 우회 = 바이너리 직접 호출 `./node_modules/.bin/jest`, `./node_modules/.bin/tsc --noEmit`. (기능 무해 — JS로 폴백. 원하면 `pnpm approve-builds`로 승인.)
 - W2 벤치: 서버(`pnpm start:dev`)+로컬 PG 기동, admin 계정 존재 확인 후 `ADMIN_PASSWORD=... bash apps/api/test/load/bench.sh`.
 

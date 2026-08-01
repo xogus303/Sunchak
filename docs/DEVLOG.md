@@ -286,3 +286,17 @@
 - **테스트**: 신규 파일 2개(`sweep.processor.spec.ts` 3건, `reconcile.processor.spec.ts` 4건) — 둘 다 반복 타이머(30초/1분)를 기다리지 않고 `processor.process()`를 직접 호출해 검증. `afterAll`에서 `queue.obliterate({force:true})`로 `onModuleInit`이 남긴 repeatable 스케줄러까지 정리. **전체 17→24 그린.**
 - **삽질 — 통합 테스트 파일이 늘며 드러난 병렬 실행 문제**: 실DB를 쓰는 통합 스펙 파일이 `reservations.service.spec.ts` 하나뿐일 땐 안 드러났는데, `sweep`/`reconcile` 스펙을 추가하니 Jest 기본 병렬 워커가 세 파일을 동시에 돌리면서 서로의 `beforeEach` 전체삭제(`deleteMany`)가 다른 파일이 방금 만든 행을 지워버려 카운트 단언이 들쭉날쭉 실패. **원인은 같은 로컬 DB를 공유하는 여러 통합 테스트 파일 + Jest 병렬 실행의 조합** → `package.json`의 jest 설정에 `maxWorkers: 1` 추가(직렬 실행)로 해결. 프로젝트 성격(로컬 개발용 통합 테스트, CI 규모 아님)상 속도보다 정확성 우선.
 - **다음**: W4 공개 데모 모드(ADR 0016) — 진입 게이트 + 서버측 부하 시뮬 + 실시간 stats 대시보드(2.4 SSE 배관 재사용) + 데이터 리셋. `Payment.idempotencyKey` unique 재검토는 결제 단계에서.
+
+## 2026-08-01 · W4 착수 — 데이터 리셋 + seed (ADR 0016 축 C, 부분 개정)
+
+- **범위 조정**: ADR 0016 원안은 "자동 주기 리셋 + 수동 리셋 둘 다"였으나, 구현 착수 시점에 **수동 리셋만**으로 좁힘(자동/주기·활동기반 idle-timeout 모두 보류). 근거는 아래 "개정" 참고. 자동 리셋이 필요해지면(예: 실제 배포 후 방치 시간이 길어 매진 상태가 오래 남는 문제가 실제로 보이면) 그때 다시 추가.
+- **설계 중 정정된 판단 2건(사용자 발)**:
+  1. **Admin 계정 불필요**: 처음엔 seed가 admin 계정도 만들어야 한다고 제안했으나, 이는 STATUS.md의 옛 메모(개발자 본인의 로컬 수동 e2e 편의)를 데모 요구사항과 혼동한 것이었다. 실제로는 seed가 API가 아니라 Prisma로 DB에 직접 쓰고, 데모 방문자는 로그인이 아니라 게이트 토큰으로 들어오므로(ADR: "게이트 ≠ 로그인") ADMIN role이 쓰일 자리가 없다 → **드롭**.
+  2. **리셋 트리거 재검토**: "주기적(고정 간격)" 대신 "활동 기반 idle-timeout"(마지막 활동 후 N분 조용하면 리셋 — BullMQ delayed job을 활동마다 다시 거는 디바운스 패턴)을 검토했으나, 사용자가 최종적으로 **"게이트 진입 후 수동 리셋"** 하나로 확정 — 자동화 자체를 이번 범위에서 제외.
+- **데모 이벤트 식별**: `Event.isDemo Boolean @default(false)` 추가(마이그레이션 `20260801121614_add_event_is_demo`). 로컬 개발 중 수동으로 만든 다른 이벤트와 섞이지 않도록 명시적 플래그로 리셋 대상을 특정(느슨한 "이벤트가 1개뿐이라 가정"보다 안전).
+- **구현**:
+  - **신규 `demo/` 모듈**(ADR: "데모 전용 코드는 격리하라"에 따라 별도 모듈로 분리). `demo.service.ts`의 `resetDemoEvent()`가 seed와 수동 리셋 엔드포인트가 공유하는 핵심 로직 — ①`isDemo:true` 이벤트 조회(없으면 404) ②예매 전체 삭제 ③재고 `remainingQty=totalQty`로 원복(`version` 증가로 낙관적 락 전략과 충돌 방지) ④Redis `stock:event:{id}` SET ⑤`openAt=now, status=ON_SALE`.
+  - **`prisma/seed.ts`**: `isDemo:true` 이벤트가 없을 때만 생성(idempotent) — 리셋과 역할 분리(seed=최초 존재 보장, reset=초기 상태로 되돌림). `package.json`에 `prisma.seed` 필드 + `prisma:seed` 스크립트 등록.
+  - **`POST /demo/reset`**: 가드 없음(의도적) — 진입 게이트(ADR 축 A, 다음 작업)가 아직 없어서다. 컨트롤러에 "게이트 구현 시 그 가드로 보호 예정" 주석 명시. 배포 전 로컬 개발 단계라 당장 위험 없음.
+- **테스트**: 신규 `demo.service.spec.ts` 4건(리셋 정상 동작, 데모 이벤트 없을 때 404, openAt/status 복구, `isDemo=false` 이벤트는 건드리지 않음). **전체 24→28 그린.** 서버 기동 후 `curl -X POST /demo/reset`으로 실제 HTTP 경로까지 수동 검증.
+- **다음**: W4 진입 게이트(ADR 축 A) — `DEMO_GATE_PASSWORD` 검증 + 데모 토큰 발급 + 전역 가드. 이후 서버측 시뮬레이션(축 B-1) + stats SSE(축 B-2) 순.
