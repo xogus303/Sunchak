@@ -5,7 +5,7 @@
 > - **세션 시작 시**: 이 파일을 가장 먼저 읽고 "다음 할 일"부터 이어간다.
 > - **세션 끝 / 커밋 전**: 이 파일을 **덮어써서** 최신 상태로 갱신한다. (시간순 이력·삽질은 `DEVLOG.md`, 결정 근거는 `decisions/`)
 
-**마지막 업데이트:** 2026-07-22 (**W3 2.4 SSE 확정 push 구현·검증 완료**. **다음은 2.5 안전장치**)
+**마지막 업데이트:** 2026-08-01 (**W3 2.5 안전장치(HELD TTL 만료 회수 + Redis 재구성) 구현·검증 완료 — W3 전체 완료**. **다음은 W4 공개 데모 모드**)
 
 ---
 
@@ -32,21 +32,21 @@
   - **파일**: `reservation-events.service.ts`(신규, 버스), `reservation-stream.controller.ts`(신규, `@Controller('reservations')`+`@Sse(':id/stream')`), `confirm.processor.ts`/`reservations.service.ts`(`assertOwned`+`streamStatus`)/`reservations.module.ts` 수정.
   - **검증**: `async @Sse`가 안전한지 NestJS 소스로 확정(`Promise.resolve(result).then` + `.catch(reject)` → 정상 구독 / 예외는 헤더 전 404·403). **통합 6→9**(버스 필터링·따라잡기·HELD중 확정수신). **전체 17개 그린.**
   - **⚠️ 남은 틈**: 브라우저 `EventSource`는 `Authorization` 헤더 못 붙임 → 지금 JWT 가드 유지라 **프론트 붙일 때 쿼리파라미터 토큰/쿠키로 해결** 필요. 하트비트 없음(운영 후순위).
+- **✅ W3 2.5 — HELD TTL 만료 회수 + Redis 재구성 구현·검증 완료 (2026-08-01) — W3 전체 완료**: 안전장치 2종, 서로 다른 트리거·계산.
+  - **개념 정리(사용자 자기설명 검증, DEVLOG 참고)**: BullMQ delayed job(예매당 1개)이 아니라 **주기적 스윕(repeatable job)**을 택함 — `delay`는 "그 전엔 안 함"만 보장하지 정확한 시점을 보장 안 해, 선착순처럼 다수가 동시 만료되면 delayed job이 워커 동시성만큼 밀림. 벌크 UPDATE 1번은 건수 무관. **`UPDATE...RETURNING`**으로 "만료 대상 찾기"와 "상태 변경"을 원자적 한 문장으로(SELECT 후 UPDATE면 confirm 워커와 경합 재발 — `WHERE status=HELD`가 방어선). **DB 먼저, Redis 보정은 나중**(반대 순서면 크래시 시 초과판매 재발 가능). 재구성 잡은 "Redis가 죽었을 때만"이 아니라 **DB·Redis dual-write는 근본적으로 트랜잭션 못 묶어 항상 미세한 틈이 있음** → 서버 기동 시 1회가 아니라 **상시 주기적**.
+  - **구현**: `HELD_TTL_MS`(5분, `reservations.service.ts`) + `createHeld`가 `heldUntil` 실제 세팅(2.2/2.3에선 생략했던 부분). 신규 `sweep.processor.ts`(30초 주기, `$queryRaw`로 원자적 EXPIRE + eventId별 합산 `INCRBY`), 신규 `reconcile.processor.ts`(1분 주기, Prisma `groupBy`로 `총재고−(HELD+CONFIRMED)` 계산 후 이벤트별 `SET`). 둘 다 `OnModuleInit`에서 자기 큐에 스스로를 `repeat` 등록(confirm과 달리 외부 producer 없음).
+  - **삽질**: 통합 테스트 파일이 3개(reservations/sweep/reconcile)로 늘며 Jest 기본 병렬 실행이 같은 로컬 DB를 공유하는 파일들의 `beforeEach` 전체삭제를 서로 밟음 → `package.json` jest 설정에 **`maxWorkers: 1`** 추가(직렬 실행)로 해결.
+  - **테스트**: 신규 2파일(sweep 3건 + reconcile 4건). **전체 17→24 그린.**
 
 ## 🔨 진행 중 / 막힌 것
-- (막힌 것 없음. 2.4까지 완료.)
-- **⚠️ 알려진 틈 — HELD 고아**: `createHeld`에서 `reservation.create` 커밋과 `queue.add` 사이에 크래시 나면 job 없는 HELD가 남는다(DB·큐 이중 쓰기라 비원자적). Outbox 패턴은 과함 → **2.5 TTL 회수 잡이 안전망(EXPIRE)** 으로 정리하기로 결정. (코드 주석에도 명시.)
-- **⚠️ seed 스크립트가 없다**: DB가 비어 있어(admin·이벤트 없음) `held`를 **수동 e2e**로 돌리려면 회원가입·이벤트 생성이 선행돼야 한다. (통합 테스트는 setup에서 자체 생성하므로 무관.) 수동 확인이 잦아지면 seed 도입 고려.
+- (막힌 것 없음. W3 전체 완료.)
+- **⚠️ seed 스크립트가 없다**: DB가 비어 있어(admin·이벤트 없음) `held`를 **수동 e2e**로 돌리려면 회원가입·이벤트 생성이 선행돼야 한다. (통합 테스트는 setup에서 자체 생성하므로 무관.) 수동 확인이 잦아지면 seed 도입 고려. (**W4 데모 리셋에서 함께 해소 예정**.)
 - 장시간 테스트 시 JWT(1h) 만료 주의 → 재로그인으로 토큰 갱신.
 
 ## ▶️ 다음 할 일 (이 순서로)
-1. ✅ ~~W1~~ / ✅ ~~W2 + ADR 0014~~ / ✅ ~~W3 설계 + ADR 0015~~ / ✅ ~~스키마 변경~~ / ✅ ~~마이그레이션~~ / ✅ ~~2.2 HELD 선기록 + 멱등성 보상~~ / ✅ ~~2.3 BullMQ 큐/워커 확정~~ / ✅ ~~2.4 SSE 확정 push~~ — 여기까지 완료.
-2. **W3 구현 (ADR 0015를 코드로) — 남은 순서:**
-   1. **2.5 안전장치**: HELD TTL 만료 회수(`heldUntil` 세팅 + 만료 스윕, **위 "HELD 고아"의 안전망 겸함**) + Redis 유실 재구성(`총재고−(HELD+CONFIRMED)`) 잡. → 검증: Redis flush 후 재구성값 정확. **여기서 `heldUntil`을 실제로 세팅**(2.2/2.3에선 사용처 없어 생략).
-   - (참고) **stats 스트림**(재고/HELD/CONFIRMED/큐 적체)은 2.4에서 만든 `@Sse`+`Subject` 배관을 그대로 재사용해 W4 데모 대시보드(ADR 0016)로 얹으면 됨 — 별도 엔드포인트 하나 추가 수준.
-3. **W4 공개 데모 모드 (ADR 0016)** — 배포와 함께: 진입 게이트(가드+데모 토큰) + 서버측 부하 시뮬(상한·쿨다운) + 실시간 stats 대시보드(2.4 SSE 재사용) + 데이터 리셋(자동 주기+수동). **seed/리셋 로직을 여기서 정비**(아래 4번 흡수).
-4. (선택) `Payment.idempotencyKey`도 단독 unique — 같은 유출 문제 가능. W3 결제 단계에서 재검토.
-5. (선택) seed 스크립트(admin·이벤트 재현) — 수동 e2e가 잦아지면. (**W4 데모 리셋에서 함께 해소 예정**.)
+1. ✅ ~~W1~~ / ✅ ~~W2 + ADR 0014~~ / ✅ ~~W3 설계 + ADR 0015~~ / ✅ ~~스키마 변경~~ / ✅ ~~마이그레이션~~ / ✅ ~~2.2 HELD 선기록 + 멱등성 보상~~ / ✅ ~~2.3 BullMQ 큐/워커 확정~~ / ✅ ~~2.4 SSE 확정 push~~ / ✅ ~~2.5 안전장치(TTL 회수 + Redis 재구성)~~ — **W3 전체 완료.**
+2. **W4 공개 데모 모드 (ADR 0016)** — 배포와 함께: 진입 게이트(가드+데모 토큰) + 서버측 부하 시뮬(상한·쿨다운) + 실시간 stats 대시보드(2.4 SSE 배관 재사용) + 데이터 리셋(자동 주기+수동). **seed/리셋 로직을 여기서 정비**(위 seed 항목 흡수).
+3. (선택) `Payment.idempotencyKey`도 단독 unique — 같은 유출 문제 가능. W3 결제 단계에서 재검토.
 
 ## 🖥️ 이 기기(현재) 로컬 환경 — 재세팅 시 주의
 - **Node 버전**: 활성 `node`가 v22.12.0이면 pnpm(v22.13+ 요구)이 거부한다. **nvm의 v22.23.1 사용**: 명령 앞에 `export PATH="$HOME/.nvm/versions/node/v22.23.1/bin:$PATH"` 붙이거나 `nvm use v22.23.1`.
@@ -55,7 +55,8 @@
 - **마이그레이션**: `migrate dev`는 대화형이라 비대화형(에이전트) 환경에서 막힌다. 우회 = `prisma migrate diff --from-url <DB> --to-schema-datamodel prisma/schema.prisma --script > migration.sql` → `prisma migrate deploy` → `prisma generate`. (사람이 직접 터미널에서 하면 `migrate dev`가 정상.)
 
 ## 🧪 테스트 실행법
-- `cd apps/api && pnpm exec jest`(전체 17개) 또는 `pnpm exec jest reservations`(held+SSE 통합 9개). 사전조건: 로컬 PG·Redis 기동.
+- `cd apps/api && pnpm exec jest`(전체 24개) 또는 `pnpm exec jest reservations`(held+SSE+sweep+reconcile 통합 16개). 사전조건: 로컬 PG·Redis 기동.
+- ⚠️ 실DB를 쓰는 통합 스펙 파일이 여러 개(reservations/sweep/reconcile)라 **`maxWorkers: 1`(package.json jest 설정)로 직렬 실행** — 병렬 실행 시 서로의 `beforeEach` 전체삭제가 충돌한다(2.5에서 발견).
 - ⚠️ **`pnpm exec`가 막히면**: bullmq의 선택적 네이티브 빌드(`msgpackr-extract`)가 스킵돼 pnpm의 실행 전 deps 점검이 실패할 수 있다. 우회 = 바이너리 직접 호출 `./node_modules/.bin/jest`, `./node_modules/.bin/tsc --noEmit`. (기능 무해 — JS로 폴백. 원하면 `pnpm approve-builds`로 승인.)
 - W2 벤치: 서버(`pnpm start:dev`)+로컬 PG 기동, admin 계정 존재 확인 후 `ADMIN_PASSWORD=... bash apps/api/test/load/bench.sh`.
 

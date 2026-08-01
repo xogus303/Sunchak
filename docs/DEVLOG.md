@@ -268,3 +268,21 @@
 - **삽질**: 이 기기에 `@nestjs/bullmq`·`bullmq` 미설치(fresh) → tsc가 그 두 모듈만 에러(내 신규 코드는 무에러) → `pnpm install`로 해소. Docker 데몬 꺼져 있어 `open -a Docker`로 기동 후 infra up.
 - **정직한 남은 틈(2.4에서 의도적으로 안 함)**: ① 브라우저 `EventSource`는 `Authorization` 헤더 못 붙임 → 지금 JWT 가드 유지라 실제 프론트 붙일 때(W3 후반) 쿼리파라미터 토큰/쿠키로 해결 필요. ② 하트비트 없음(프록시 유휴 끊김) → 운영 관심사 후순위. ③ ADR 0016 데모 stats 스트림도 같은 @Sse+Observable 메커니즘이라 재사용 가능(이번에 일반 배관을 만들어둠).
 - **다음**: 2.5 안전장치(HELD TTL 만료 회수 = 고아 안전망 + `heldUntil` 실제 세팅 + Redis 유실 재구성).
+
+## 2026-08-01 · W3 2.5 — HELD TTL 만료 회수 + Redis 재구성
+
+- **개념 설계(사용자 자기설명으로 검증)**: 두 안전장치를 별개 문제로 다뤘다.
+  - **BullMQ job/queue/worker 재정리**: job=주문서(처리할 일 1건의 데이터), queue=주문서가 쌓이는 곳(실제 저장은 Redis), producer=`queue.add`로 넣는 쪽, worker=`process()`로 꺼내 처리하는 쪽. `bullmq`(엔진, Redis와 직접 통신)와 `@nestjs/bullmq`(Nest 데코레이터 어댑터, 리플렉션으로 메타데이터를 읽어 워커 인스턴스화를 대신해줌)를 구분.
+  - **TTL 스윕 트리거 — delayed job(예매당 1개) vs 주기적 스윕 비교**: 사용자가 처음 "정확한 타이밍엔 delayed job"이라 판단했으나, **BullMQ의 `delay`는 "그 전엔 안 함"이라는 하한선만 보장하지 "정확히 그때 처리"는 워커 동시성에 달림**을 짚어내면서 뒤집음 — 선착순 특성상 다수 HELD가 동시에 만료되면 delayed job은 오히려 순차 처리로 밀리는 반면, 벌크 UPDATE 1번(주기적 스윕)은 건수와 무관. **TTL은 원래 여유시간이라 몇십 초 오차가 무해**하다는 판단까지 사용자가 스스로 도달 → **주기적 스윕(BullMQ repeatable job)**으로 확정.
+  - **원자적 claim — `UPDATE...RETURNING`**: "대상 찾기(SELECT)"와 "상태 바꾸기(UPDATE)"를 분리하면 그 사이 confirm 워커가 같은 행을 채가는 경합이 재발함을 사용자가 직접 도출(ConfirmProcessor의 `WHERE status=HELD` 패턴과 동일 원리 — "판단과 쓰기를 한 문장으로"). Prisma `updateMany`는 `RETURNING`을 지원 안 해 `$queryRaw` 필요. **정정 필요했던 오해**: `RETURNING`이 eventId별로 합산해준다고 생각했으나, 실제론 바뀐 행을 그대로(합산 없이) 돌려줄 뿐 — 합산은 애플리케이션 코드(TS)에서.
+  - **DB 먼저, Redis는 나중(순서)**: 반대 순서(Redis 먼저)로 크래시 나면 "이미 팔린 좌석"이 Redis에서 되돌려져 재판매되는데 원래 HELD도 뒤늦게 CONFIRMED될 수 있어 초과판매 재발. DB 먼저면 크래시 나도 뒤늦은 confirm job이 `WHERE status=HELD`에 안 걸려 자동 무시(안전한 방향의 실패).
+  - **재구성 잡의 트리거 — "Redis가 죽었을 때만"이 아니다**: 처음엔 "Redis 재시작/flush 시에만 필요"라 생각했으나, TTL 스윕의 "DB 먼저→Redis 나중" 자체도 그 사이 크래시 나면 Redis가 살아있는 채로 어긋날 수 있음을 재발견 — **DB·Redis 두 저장소에 걸친 쓰기(dual-write)는 하나의 트랜잭션으로 못 묶어 이 틈이 구조적으로 항상 존재**. 그래서 재구성도 "서버 기동 시 1회"가 아니라 **상시 주기적** 잡이어야 함.
+- **구현**:
+  - **`reservations.service.ts`**: `HELD_TTL_MS = 5분` 상수 추가(`MAX_RETRIES`와 같은 자리). `createHeld`가 HELD 예매 생성 시 `heldUntil: now + HELD_TTL_MS` 세팅(2.2/2.3에선 미사용이라 생략했던 부분). 지금은 confirm job이 즉시 확정돼 TTL이 정상 결제 시나리오보단 "HELD 고아"(create 커밋~queue.add 사이 크래시) 회수용 안전망에 가깝다는 것도 확인.
+  - **신규 `sweep.processor.ts`**: `SWEEP_QUEUE`(30초 주기). `$queryRaw`로 `UPDATE reservations SET status='EXPIRED' WHERE status='HELD' AND heldUntil<now() RETURNING id, eventId, quantity` 원자적 claim → eventId별 quantity 합산(TS `Map`) → 이벤트별 `INCRBY` 보정.
+  - **신규 `reconcile.processor.ts`**: `RECONCILE_QUEUE`(1분 주기). Prisma `groupBy`(HELD+CONFIRMED를 eventId별 quantity 합산, raw SQL 불필요 — RETURNING과 달리 groupBy는 Prisma 기본 지원)로 총재고−합산을 계산해 이벤트별 `SET`(상대 연산 아님 — DB가 진실이라 절대값 덮어쓰기).
+  - **두 프로세서 모두 `OnModuleInit`에서 자기 큐에 `{repeat:{every:...}}`로 자기 자신을 등록** — confirm과 달리 외부 producer가 없어 스스로 반복 예약. 같은 repeat 설정이면 재기동해도 BullMQ가 중복 스케줄러를 안 만듦(멱등 등록).
+  - `reservations.module.ts`: 큐 2개 추가 등록(`defaultJobOptions: removeOnComplete만` — sweep/reconcile은 이번 틱이 실패해도 다음 틱이 전체를 다시 훑어 스스로 만회하므로 confirm과 달리 attempts/backoff 불필요).
+- **테스트**: 신규 파일 2개(`sweep.processor.spec.ts` 3건, `reconcile.processor.spec.ts` 4건) — 둘 다 반복 타이머(30초/1분)를 기다리지 않고 `processor.process()`를 직접 호출해 검증. `afterAll`에서 `queue.obliterate({force:true})`로 `onModuleInit`이 남긴 repeatable 스케줄러까지 정리. **전체 17→24 그린.**
+- **삽질 — 통합 테스트 파일이 늘며 드러난 병렬 실행 문제**: 실DB를 쓰는 통합 스펙 파일이 `reservations.service.spec.ts` 하나뿐일 땐 안 드러났는데, `sweep`/`reconcile` 스펙을 추가하니 Jest 기본 병렬 워커가 세 파일을 동시에 돌리면서 서로의 `beforeEach` 전체삭제(`deleteMany`)가 다른 파일이 방금 만든 행을 지워버려 카운트 단언이 들쭉날쭉 실패. **원인은 같은 로컬 DB를 공유하는 여러 통합 테스트 파일 + Jest 병렬 실행의 조합** → `package.json`의 jest 설정에 `maxWorkers: 1` 추가(직렬 실행)로 해결. 프로젝트 성격(로컬 개발용 통합 테스트, CI 규모 아님)상 속도보다 정확성 우선.
+- **다음**: W4 공개 데모 모드(ADR 0016) — 진입 게이트 + 서버측 부하 시뮬 + 실시간 stats 대시보드(2.4 SSE 배관 재사용) + 데이터 리셋. `Payment.idempotencyKey` unique 재검토는 결제 단계에서.

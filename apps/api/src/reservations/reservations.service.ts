@@ -39,6 +39,11 @@ export class ReservationsService {
   // 낙관적 락 재시도 상한.
   private readonly MAX_RETRIES = 5;
 
+  // HELD 유효 시간(2.5 안전장치). 지금은 confirm job이 즉시 확정돼 거의 발동하지
+  // 않고, 주로 'HELD 고아'(create 커밋~queue.add 사이 크래시) 회수용 안전망이다.
+  // 실제 결제가 붙으면 체크아웃 소요시간 기준으로 재검토할 값.
+  private readonly HELD_TTL_MS = 5 * 60 * 1000;
+
   /**
    * 예매 진입점 — strategy에 따라 각 구현으로 분기한다.
    * naive~redis는 W2 벤치마크 비교용, held는 W3 최종 흐름의 진입부다.
@@ -235,6 +240,7 @@ export class ReservationsService {
           quantity,
           idempotencyKey,
           status: ReservationStatus.HELD,
+          heldUntil: new Date(Date.now() + this.HELD_TTL_MS),
         },
       });
 
