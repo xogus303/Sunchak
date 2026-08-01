@@ -5,7 +5,7 @@
 > - **세션 시작 시**: 이 파일을 가장 먼저 읽고 "다음 할 일"부터 이어간다.
 > - **세션 끝 / 커밋 전**: 이 파일을 **덮어써서** 최신 상태로 갱신한다. (시간순 이력·삽질은 `DEVLOG.md`, 결정 근거는 `decisions/`)
 
-**마지막 업데이트:** 2026-08-01 (**W3 전체 완료 + W4 착수: 데이터 리셋+seed 구현·검증 완료**. **다음은 W4 진입 게이트**)
+**마지막 업데이트:** 2026-08-01 (**W3 전체 완료 + W4 데이터 리셋/seed/진입 게이트 구현·검증 완료**. **다음은 방문자 식별 방식 결정 → W4 서버측 시뮬레이션**)
 
 ---
 
@@ -42,15 +42,21 @@
   - **데모 이벤트 식별**: `Event.isDemo Boolean` 추가(마이그레이션 완료) — 로컬의 다른 테스트 이벤트와 안 섞이게.
   - **구현**: 신규 `demo/` 모듈. `DemoService.resetDemoEvent()`(예매 삭제→재고/Redis 원복→openAt·status 리셋)를 `prisma/seed.ts`(idempotent, 없으면만 생성)와 `POST /demo/reset` 엔드포인트가 공유. 리셋 엔드포인트는 **아직 가드 없음**(진입 게이트가 다음 작업이라 그때 보호 예정, 코드 주석에 명시).
   - **테스트**: 신규 `demo.service.spec.ts` 4건. **전체 24→28 그린.** curl로 실제 HTTP 경로도 수동 검증.
+- **✅ W4 진입 게이트 구현·검증 완료 (2026-08-01, ADR 0016 축 A)**: 이 프로젝트의 첫 **전역 가드**.
+  - **토큰**: 기존 `JwtService` 재사용(`{type:'demo'}` payload, 새 시크릿 불필요, `JWT_EXPIRES_IN` 그대로). `AuthModule`이 `JwtModule`을 `exports`하도록 수정.
+  - **채널 분리**: 게이트 토큰은 `X-Demo-Token` 헤더(로그인 `Authorization`과 별개) — "게이트 ≠ 로그인"이 헤더 레벨까지 분리됨.
+  - **구현**: `POST /demo/gate`(비번검증→토큰발급, `@Public()`으로 가드 우회) + `DemoGateGuard`(`APP_GUARD`로 전역 등록, `@Public()` 없는 모든 라우트에 적용) + `/health`에 `@Public()`. **`DEMO_GATE_PASSWORD` 미설정 시 게이트 자동 비활성화**(로컬 개발·기존 스크립트 안 깨지게).
+  - **⚠️ 방문자 식별 방식 미정**: 게이트 설계 중 "방문자가 직접 예매 가능해야 한다"가 새로 나왔는데, 그 방식(로그인 없는 게스트 vs Google SSO 등)이 세 번 바뀌다 **오늘 범위에서 분리**됐다. 다음 세션에서 결정 필요(ADR 0013과 연관, 새 ADR 검토).
+  - **테스트**: `DemoGateGuard` 순수 단위 테스트 6건(가짜 `ExecutionContext`, DB/HTTP 불필요) + `enterGate` 통합 테스트 3건. **전체 28→37 그린.** curl로 5단계 전체 흐름(공개→차단→거부→발급→통과) + 비번 미설정 시 자동 우회 수동 검증.
 
 ## 🔨 진행 중 / 막힌 것
 - (막힌 것 없음.)
-- **⚠️ `POST /demo/reset`이 아직 무방비 상태**: 진입 게이트 구현 전까지는 인증·인가 없이 누구나 호출 가능(로컬 개발 단계라 당장 위험 없음, 배포 전 반드시 게이트로 보호해야 함).
+- **⚠️ 방문자 식별/예매 방식 미정**: "방문자가 직접 예매 가능"은 확정됐지만 그 인증 방식(게스트 vs Google SSO 등)은 미정 — 다음 작업의 전제.
 - 장시간 테스트 시 JWT(1h) 만료 주의 → 재로그인으로 토큰 갱신.
 
 ## ▶️ 다음 할 일 (이 순서로)
-1. ✅ ~~W1~~ / ✅ ~~W2 + ADR 0014~~ / ✅ ~~W3 전체(설계+2.2~2.5) + ADR 0015~~ / ✅ ~~W4 데이터 리셋+seed~~ — 여기까지 완료.
-2. **W4 진입 게이트 (ADR 0016 축 A)** — `DEMO_GATE_PASSWORD` 검증 API + 단기 데모 토큰 발급 + 전역 가드. **`POST /demo/reset`을 포함해 API 전체를 이 가드로 보호**(현재 무방비 상태 해소).
+1. ✅ ~~W1~~ / ✅ ~~W2 + ADR 0014~~ / ✅ ~~W3 전체(설계+2.2~2.5) + ADR 0015~~ / ✅ ~~W4 데이터 리셋+seed~~ / ✅ ~~W4 진입 게이트~~ — 여기까지 완료.
+2. **방문자 식별/예매 방식 결정** — 게스트(로그인 없음) vs Google SSO 등. 확정되면 ADR로 남기고, 필요 시 `POST /reservations`의 `JwtAuthGuard` 의존을 재설계.
 3. **W4 서버측 부하 시뮬레이션 (축 B-1)** — 가상 유저 N명 투입 엔드포인트 + 상한(`DEMO_SIM_MAX_VU`)·쿨다운(Redis, `DEMO_SIM_COOLDOWN_MS`).
 4. **W4 실시간 stats 대시보드 (축 B-2)** — 2.4의 `@Sse`+`Subject` 배관 재사용, 재고/HELD/CONFIRMED/큐 적체 스트리밍.
 5. **W4 프론트엔드(apps/web)** — 게이트 화면 + 데모 컨트롤 화면. 백엔드 조각들이 갖춰진 뒤("서버 먼저" 원칙).
@@ -65,7 +71,7 @@
 - **seed 스크립트 실행**: `prisma db seed`가 내부적으로 `ts-node`를 PATH에서 찾는데, `./node_modules/.bin/prisma`처럼 바이너리를 직접 호출하면 PATH에 `node_modules/.bin`이 없어 `ENOENT` 에러가 난다. `export PATH="$(pwd)/node_modules/.bin:$PATH"`를 먼저 붙이거나 `pnpm exec prisma db seed` 사용.
 
 ## 🧪 테스트 실행법
-- `cd apps/api && pnpm exec jest`(전체 28개) 또는 `pnpm exec jest reservations`(held+SSE+sweep+reconcile 통합 16개). 사전조건: 로컬 PG·Redis 기동.
+- `cd apps/api && pnpm exec jest`(전체 37개) 또는 `pnpm exec jest reservations`(held+SSE+sweep+reconcile 통합 16개) · `pnpm exec jest demo`(리셋+게이트 13개). 사전조건: 로컬 PG·Redis 기동.
 - ⚠️ 실DB를 쓰는 통합 스펙 파일이 여러 개(reservations/sweep/reconcile/demo)라 **`maxWorkers: 1`(package.json jest 설정)로 직렬 실행** — 병렬 실행 시 서로의 `beforeEach` 전체삭제가 충돌한다(2.5에서 발견).
 - ⚠️ **`pnpm exec`가 막히면**: bullmq의 선택적 네이티브 빌드(`msgpackr-extract`)가 스킵돼 pnpm의 실행 전 deps 점검이 실패할 수 있다. 우회 = 바이너리 직접 호출 `./node_modules/.bin/jest`, `./node_modules/.bin/tsc --noEmit`. (기능 무해 — JS로 폴백. 원하면 `pnpm approve-builds`로 승인.)
 - W2 벤치: 서버(`pnpm start:dev`)+로컬 PG 기동, admin 계정 존재 확인 후 `ADMIN_PASSWORD=... bash apps/api/test/load/bench.sh`.

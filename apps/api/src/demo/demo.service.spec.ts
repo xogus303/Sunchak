@@ -1,11 +1,14 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { ConfigModule } from '@nestjs/config';
-import { NotFoundException } from '@nestjs/common';
+import { ConfigModule, ConfigService } from '@nestjs/config';
+import { JwtModule, JwtService } from '@nestjs/jwt';
+import { NotFoundException, UnauthorizedException } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { EventStatus, ReservationStatus } from '@prisma/client';
 import { DemoService } from './demo.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
+
+const TEST_GATE_PASSWORD = 'sunchak-test';
 
 // 리셋의 핵심(실제 삭제·재고 원복·Redis 동기화)은 실제 DB·Redis가 있어야
 // 의미 있게 검증된다.
@@ -22,8 +25,12 @@ describe('DemoService (통합 — 데모 리셋)', () => {
   const readStock = async () => Number(await redis.get(stockKey()));
 
   beforeAll(async () => {
+    process.env.DEMO_GATE_PASSWORD = TEST_GATE_PASSWORD; // ConfigModule 로드 전에 세팅
     moduleRef = await Test.createTestingModule({
-      imports: [ConfigModule.forRoot({ isGlobal: true })],
+      imports: [
+        ConfigModule.forRoot({ isGlobal: true }),
+        JwtModule.register({ secret: 'test-secret' }),
+      ],
       providers: [DemoService, PrismaService, RedisService],
     }).compile();
     await moduleRef.init();
@@ -34,6 +41,7 @@ describe('DemoService (통합 — 데모 리셋)', () => {
   });
 
   afterAll(async () => {
+    delete process.env.DEMO_GATE_PASSWORD; // 다른 스펙 파일에 안 새게 정리
     await moduleRef.close();
   });
 
@@ -124,5 +132,34 @@ describe('DemoService (통합 — 데모 리셋)', () => {
       where: { eventId: other.id },
     });
     expect(untouched.remainingQty).toBe(20); // 손대지 않음
+  });
+
+  describe('게이트', () => {
+    it('올바른 비번이면 type=demo 토큰을 발급한다(로그인 payload와 다른 모양)', async () => {
+      const { demoToken } = await service.enterGate(TEST_GATE_PASSWORD);
+
+      const jwt = moduleRef.get(JwtService);
+      const payload = jwt.verify(demoToken);
+      expect(payload.type).toBe('demo');
+      expect(payload.sub).toBeUndefined(); // 로그인 JWT의 sub/email/role이 없다
+    });
+
+    it('틀린 비번이면 401을 던진다', async () => {
+      await expect(service.enterGate('wrong-password')).rejects.toBeInstanceOf(
+        UnauthorizedException,
+      );
+    });
+
+    it('DEMO_GATE_PASSWORD가 설정 안 돼 있으면 어떤 비번을 넣어도 401이다', async () => {
+      delete process.env.DEMO_GATE_PASSWORD;
+      const config = moduleRef.get(ConfigService);
+      expect(config.get('DEMO_GATE_PASSWORD')).toBeUndefined();
+
+      await expect(
+        service.enterGate(TEST_GATE_PASSWORD),
+      ).rejects.toBeInstanceOf(UnauthorizedException);
+
+      process.env.DEMO_GATE_PASSWORD = TEST_GATE_PASSWORD; // 다음 테스트를 위해 복원
+    });
   });
 });

@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { APP_GUARD } from '@nestjs/core';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { BullModule } from '@nestjs/bullmq';
 import { PrismaModule } from './prisma/prisma.module';
@@ -7,6 +8,7 @@ import { AuthModule } from './auth/auth.module';
 import { EventsModule } from './events/events.module';
 import { ReservationsModule } from './reservations/reservations.module';
 import { DemoModule } from './demo/demo.module';
+import { DemoGateGuard } from './demo/guards/demo-gate.guard';
 import { AppController } from './app.controller';
 
 @Module({
@@ -39,5 +41,11 @@ import { AppController } from './app.controller';
     DemoModule,
   ],
   controllers: [AppController],
+  providers: [
+    // 첫 전역 가드(ADR 0016 축 A) — APP_GUARD로 등록하면 컨트롤러마다
+    // @UseGuards를 안 붙여도 모든 라우트에 자동 적용된다. @Public()이 붙은
+    // 라우트(게이트 자신, 헬스체크)만 예외.
+    { provide: APP_GUARD, useClass: DemoGateGuard },
+  ],
 })
 export class AppModule {}

@@ -1,13 +1,22 @@
-import { Controller, Post } from '@nestjs/common';
+import { Body, Controller, Post } from '@nestjs/common';
 import { DemoService } from './demo.service';
+import { GateDto } from './dto/gate.dto';
+import { Public } from './decorators/public.decorator';
 
-// ⚠️ 데모 전용, 파괴적 엔드포인트(예매 전체 삭제 + 재고 원복).
-// 아직 진입 게이트(ADR 0016 축 A)가 없어 지금은 가드가 없다 — 게이트 구현 시
-// 그 가드로 이 엔드포인트를 보호한다(로컬 개발 단계라 당장은 무해).
 @Controller('demo')
 export class DemoController {
   constructor(private readonly demoService: DemoService) {}
 
+  // 게이트 자신은 전역 가드보다 먼저 열려있어야 한다 — 그래야 애초에 토큰을
+  // 발급받을 수 있다(닭이 먼저냐 달걀이 먼저냐 문제 회피).
+  @Public()
+  @Post('gate')
+  enterGate(@Body() dto: GateDto) {
+    return this.demoService.enterGate(dto.password);
+  }
+
+  // ⚠️ 데모 전용, 파괴적 엔드포인트(예매 전체 삭제 + 재고 원복).
+  // 전역 게이트 가드(DemoGateGuard)로 보호된다 — 별도 가드 불필요.
   @Post('reset')
   reset() {
     return this.demoService.resetDemoEvent();

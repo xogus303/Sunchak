@@ -27,5 +27,9 @@ import { JwtStrategy } from './strategies/jwt.strategy';
   ],
   controllers: [AuthController],
   providers: [AuthService, JwtStrategy],
+  // DemoModule의 게이트 가드가 데모 토큰을 sign/verify하려고 JwtService가 필요
+  // 하다 — 같은 JWT_SECRET을 재사용(새 시크릿 불필요, payload의 `type` 필드로
+  // 로그인 토큰과 구분).
+  exports: [JwtModule],
 })
 export class AuthModule {}
