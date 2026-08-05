@@ -5,7 +5,7 @@
 > - **세션 시작 시**: 이 파일을 가장 먼저 읽고 "다음 할 일"부터 이어간다.
 > - **세션 끝 / 커밋 전**: 이 파일을 **덮어써서** 최신 상태로 갱신한다. (시간순 이력·삽질은 `DEVLOG.md`, 결정 근거는 `decisions/`)
 
-**마지막 업데이트:** 2026-08-05 (**W4 서버측 부하 시뮬레이션(축 B-1) + 실시간 stats 대시보드(축 B-2) 구현·검증 완료 — 백엔드 데모 조각 전부 완료**. **다음은 W4 프론트엔드(apps/web)**)
+**마지막 업데이트:** 2026-08-05 (**W4 백엔드 전부 완료 + 프론트엔드 착수 — pnpm 워크스페이스 신설, Next.js 스캐폴딩, SSE 인증을 쿠키 기반으로 전환**. **다음은 실제 데모 화면 구현**)
 
 ---
 
@@ -66,15 +66,22 @@
   - **테스트**: 2건 추가(404, 스냅샷 값 일치 — 큐는 `getQueueToken`으로 목 처리). **전체 45→47 그린.** 실서버 e2e: 리셋 후 SSE 스트림 열어두고 60명 시뮬 투입 → 재고/HELD/CONFIRMED/큐 적체가 실시간으로 변하는 걸 그대로 확인(재고 100→40, CONFIRMED 0→55→60 등).
   - **발견(보류)**: `simulateLoad()`가 쿨다운을 이벤트 존재 확인보다 먼저 걸어서, 데모 이벤트가 없는 상태(seed 전)에서 호출하면 404를 받으면서도 쿨다운은 소비됨. 사소한 엣지케이스라 지금은 기록만.
   - **W4 백엔드 데모 조각(게이트·리셋·시뮬·stats) 전부 완료.**
+- **✅ W4 프론트엔드 착수 — 워크스페이스 신설 + 쿠키 기반 인증 전환 (2026-08-05)**: apps/web을 실제로 만들기 시작.
+  - **pnpm 워크스페이스**(ADR 0012가 이 시점을 예정해둠): 루트 `package.json`+`pnpm-workspace.yaml`, `apps/api`/`apps/web` → `@sunchak/api`/`@sunchak/web`, lockfile 통합. `apps/api/package.json`의 중복 `packageManager` 필드 제거(안 지우면 워크스페이스인데도 로컬 lockfile이 계속 되살아남 — 삽질 후 발견).
+  - **`apps/web` 스캐폴딩**: Next.js 16(App Router)+TypeScript+Tailwind+TanStack Query(`Providers` 배선 완료). 이 Next.js 버전은 학습 데이터보다 최신이라 실제 문서(`node_modules/next/dist/docs/`)를 참조해가며 작업 필요.
+  - **SSE 인증을 쿠키(HttpOnly) 기반으로 전환**(기존 `X-Demo-Token`/`Authorization` 헤더 방식은 브라우저 `EventSource`가 커스텀 헤더를 못 붙여 그대로는 작동 안 함): `cookie-parser`+CORS(`credentials:true`) 추가, `JwtStrategy`/`DemoGateGuard`가 쿠키 우선·헤더 폴백, `login`/`enterGate`/Google 콜백이 쿠키도 함께 심음(Google 콜백의 오래된 "프론트 없어 JSON 임시 반환" TODO 해소 — 이제 실제로 `WEB_APP_URL`로 리다이렉트).
+  - **⚠️ 배포 시 손볼 것**: 로컬은 포트만 다르지만 배포 시 프론트/백엔드가 다른 도메인이 되면 쿠키에 `SameSite=None`+`Secure`(HTTPS 필수)가 강제됨 — `common/auth-cookie.ts`에 `NODE_ENV` 분기를 이미 심어뒀으니 배포 시 그 분기가 제대로 걸리는지만 확인.
+  - **새 env**: `WEB_APP_URL`.
+  - **검증**: 전체 47개 테스트 그린(컨트롤러의 쿠키 로직은 서비스 계층 테스트라 영향 없음) + 실서버 e2e로 **쿠키만(헤더 없이)** 게이트·로그인·SSE 스트림이 전부 통과하는 것 확인.
 
 ## 🔨 진행 중 / 막힌 것
 - (막힌 것 없음.)
 - 장시간 테스트 시 JWT(1h) 만료 주의 → 재로그인으로 토큰 갱신.
 
 ## ▶️ 다음 할 일 (이 순서로)
-1. ✅ ~~W1~~ / ✅ ~~W2 + ADR 0014~~ / ✅ ~~W3 전체(설계+2.2~2.5) + ADR 0015~~ / ✅ ~~W4 데이터 리셋+seed~~ / ✅ ~~W4 진입 게이트~~ / ✅ ~~Google SSO~~ / ✅ ~~W4 서버측 부하 시뮬레이션(축 B-1)~~ / ✅ ~~W4 실시간 stats 대시보드(축 B-2)~~ — 여기까지 완료. **W4 백엔드 전부 완료.**
-2. **W4 프론트엔드(apps/web)** — 게이트 화면 + Google 로그인 버튼 + 데모 컨트롤(시뮬 버튼) + stats 대시보드 화면. 백엔드 조각들이 갖춰진 뒤("서버 먼저" 원칙) — 이제 시작 가능.
-3. **배포** — Neon(이미 있음)·무료/저가 VM·Vercel 등. **배포 시 `GOOGLE_CALLBACK_URL`을 실제 도메인으로, Google Cloud Console의 승인된 리디렉션 URI도 함께 갱신 필요.**
+1. ✅ ~~W1~~ / ✅ ~~W2 + ADR 0014~~ / ✅ ~~W3 전체(설계+2.2~2.5) + ADR 0015~~ / ✅ ~~W4 데이터 리셋+seed~~ / ✅ ~~W4 진입 게이트~~ / ✅ ~~Google SSO~~ / ✅ ~~W4 서버측 부하 시뮬레이션(축 B-1)~~ / ✅ ~~W4 실시간 stats 대시보드(축 B-2)~~ / ✅ ~~W4 프론트 워크스페이스+쿠키 인증 전환~~ — 여기까지 완료.
+2. **W4 프론트 실제 화면** — 게이트 진입 화면 → Google 로그인 버튼 → 데모 컨트롤(시뮬 버튼) + stats 대시보드. `fetch`엔 `credentials:'include'`, `EventSource`엔 `withCredentials:true` 필요(쿠키 기반 인증이라).
+3. **배포** — Neon(이미 있음)·무료/저가 VM·Vercel 등. **배포 시 `GOOGLE_CALLBACK_URL`·`WEB_APP_URL`을 실제 도메인으로, Google Cloud Console의 승인된 리디렉션 URI도 함께 갱신 필요. 프론트/백엔드가 다른 도메인이면 쿠키 `SameSite=None`+`Secure`(HTTPS) 강제 — `common/auth-cookie.ts`의 `NODE_ENV` 분기 확인.**
 4. (선택) `Payment.idempotencyKey`도 단독 unique — 같은 유출 문제 가능. 결제 단계에서 재검토(아직 Payment API 자체가 미구현).
 5. (선택) `simulateLoad()`가 쿨다운을 데모 이벤트 확인보다 먼저 거는 순서 정리(위 축 B-1/B-2 "발견(보류)" 참고).
 
@@ -95,7 +102,8 @@
 ## 🖥️ 다른 기기에서 이어받는 법 (W2/W3는 로컬 DB!)
 1. `git pull`
 2. 이 파일 읽기 → "다음 할 일"부터.
-3. **로컬 PG + Redis 기동**: `cd infra && docker compose up -d --wait postgres redis`.
-4. `.env` 확인/생성(위 "이 기기 로컬 환경" 참고) → `cd apps/api && pnpm exec prisma migrate deploy && pnpm exec prisma generate`.
-5. 서버: `pnpm start:dev`. 테스트: `pnpm exec jest`.
-6. 더 깊은 맥락: `docs/DEVLOG.md` → `docs/decisions/` → `git log`.
+3. **의존성 설치는 이제 루트에서 한 번**(2026-08-05 pnpm 워크스페이스 도입): `pnpm install`(루트, `apps/api`+`apps/web` 전부 설치됨). `cd apps/api && pnpm install` 처럼 하위에서 개별 설치하지 않는다.
+4. **로컬 PG + Redis 기동**: `cd infra && docker compose up -d --wait postgres redis`.
+5. `.env` 확인/생성(위 "이 기기 로컬 환경" 참고, `apps/api/.env`) → `cd apps/api && pnpm exec prisma migrate deploy && pnpm exec prisma generate`.
+6. 백엔드: `cd apps/api && pnpm start:dev`(또는 루트에서 `pnpm --filter @sunchak/api start:dev`). 프론트: `pnpm --filter @sunchak/web dev`. 테스트: `cd apps/api && pnpm exec jest`.
+7. 더 깊은 맥락: `docs/DEVLOG.md` → `docs/decisions/` → `git log`.

@@ -354,3 +354,16 @@
 - **실서버 e2e 수동 검증**: 리셋 → `curl -N`으로 SSE 스트림을 열어두고 1초 뒤 60명 시뮬레이션 투입 → 실시간으로 `재고 100→40, HELD 5→0, CONFIRMED 0→55→60, 큐 적체 0→6→0`으로 움직이는 스냅샷을 그대로 확인. ADR이 그리던 "숫자가 실시간으로 움직이는 대시보드"가 실제로 동작함을 확인.
 - **발견(수정은 다음으로 미룸)**: `simulateLoad()`가 쿨다운을 먼저 잠그고 그다음에 데모 이벤트 존재를 확인해서, 이벤트가 없는 상태(seed 전)에서 호출하면 404를 받으면서도 쿨다운은 이미 소비돼버린다. 사소한 엣지케이스(정상 운영에선 이벤트가 항상 있음)라 지금은 기록만 해두고 보류.
 - **다음**: W4 프론트엔드(apps/web) — 게이트 화면 + Google 로그인 버튼 + 데모 컨트롤(시뮬 버튼)·stats 대시보드 화면. 이제 백엔드 조각(게이트·리셋·시뮬·stats)이 다 갖춰졌다.
+
+## 2026-08-05 · W4 프론트엔드 착수 — 워크스페이스 + 쿠키 기반 인증 전환
+
+- **pnpm 워크스페이스 신설**: ADR 0012가 "apps/web 추가 시점에 정식 워크스페이스 도입"이라 못박아둔 그 시점이라 별도 논의 없이 진행. 루트 `package.json`+`pnpm-workspace.yaml` 신설, `apps/api`/`apps/web`를 `@sunchak/api`/`@sunchak/web`로 워크스페이스 스코프 통일, 개별 lockfile 2개를 루트 단일 lockfile로 통합.
+  - **삽질**: `apps/api/pnpm-lock.yaml`을 지워도 이후 `pnpm --filter @sunchak/api add ...`를 돌리면 계속 되살아남 → 원인은 `apps/api/package.json`이 루트와 별개로 자기만의 `packageManager` 필드를 여전히 갖고 있었던 것(워크스페이스 멤버가 중복 선언하면 그 디렉토리를 준-루트처럼 취급해 로컬 lockfile을 미러링하는 것으로 보임). 그 필드를 지우니 재발 안 함.
+  - 네이티브 빌드 승인(`pnpm-workspace.yaml`의 `allowBuilds`)은 apps/api 단독 개발 때 이미 STATUS.md에 남겨둔 판단(Prisma·argon2만 승인, msgpackr-extract·unrs-resolver는 생략)을 그대로 재적용.
+- **Next.js 스캐폴딩**: App Router + TypeScript + Tailwind + TanStack Query. `Providers`(`'use client'`, `QueryClient`를 `useState`로 1회 생성)를 `layout.tsx`에 배선. **이 Next.js 버전(16.3.0)은 학습 데이터보다 최신**이라 `node_modules/next/dist/docs/`를 실제로 읽어 확인 — `LayoutProps<'/route'>` 같은 새 전역 타입 헬퍼가 생겼음(params/searchParams가 route별로 자동 타입 생성, `next dev`/`build`/`typegen` 시점에 생성됨).
+- **SSE 인증 방식 전환 — 쿼리파라미터 대신 쿠키(사용자 정정)**: 브라우저 `EventSource`는 커스텀 헤더를 못 붙여(기존부터 STATUS.md에 기록된 틈) `X-Demo-Token`/`Authorization` 헤더 인증이 그대로는 브라우저에서 안 열린다. 처음 "쿼리파라미터로 토큰 전달"을 수정 범위가 적다는 이유로 1순위 추천했으나, **사용자가 "데모라고 적은 수정 범위를 무조건 고르지 말고 표준·성능을 우선하라"고 정정** — URL 노출(서버 로그·브라우저 히스토리에 토큰이 남음)이라는 비표준적 절충이었음을 지적받고 쿠키(HttpOnly) 기반으로 방향을 바꿈. 이 원칙은 메모리에 기록해 앞으로도 적용.
+  - **구현**: `cookie-parser` 추가, `main.ts`에 등록 + CORS 활성화(`credentials:true`+구체적 origin — 와일드카드는 쿠키와 함께 못 씀). 공유 헬퍼 `common/auth-cookie.ts`(쿠키 이름 상수 + `httpOnly`/`secure`/`sameSite` 정책, `NODE_ENV`로 배포 시 `SameSite=None+Secure` 분기 미리 심어둠). `JwtStrategy`/`DemoGateGuard`가 **쿠키를 우선 확인하고 없으면 헤더로 폴백**(브라우저는 쿠키 자동 전송, curl 등 STATUS.md에 기록된 기존 수동 검증 절차는 헤더로 계속 동작 — 표준을 택하되 기존 워크플로우를 안 깨는 절충). `login`/`enterGate`/Google 콜백이 JSON 응답과 별개로 쿠키도 심음. **Google 콜백의 오래된 TODO(프론트 없어 JSON 임시 반환)를 이제 실제로 해소** — 쿠키 심고 `WEB_APP_URL`로 리다이렉트.
+  - **쿠키 만료 안 박음**: `maxAge`를 `JWT_EXPIRES_IN`("1h" 같은 문자열)에 맞추려 `ms` 파싱 의존성을 늘리는 대신, 브라우저 세션 쿠키로 두고 실제 만료는 JWT 서명 검증(`ignoreExpiration:false`)에 맡김 — 쿠키가 남아있어도 서버가 만료된 토큰은 어차피 거부.
+  - **새 env**: `WEB_APP_URL`(CORS origin + Google 리다이렉트 대상).
+  - **검증**: `tsc`+전체 47개 테스트 그린(서비스 계층 테스트라 컨트롤러의 쿠키 로직은 영향 없음). **실서버 e2e로 쿠키만(헤더 없이) 통과 확인**: 게이트(`POST /demo/gate` → `Set-Cookie` 확인 → 쿠키만으로 `GET /demo/stats/stream` SSE 통과, 쿠키 없인 401), 로그인(`POST /auth/login` → `Set-Cookie` 확인 → 쿠키만으로 `GET /auth/me` 통과). `reservation-stream`은 같은 `JwtStrategy`를 타므로 별도 재검증 없이 동일 보장 적용됨.
+- **다음**: 실제 화면(게이트 진입 → Google 로그인 → 데모 컨트롤 + stats 대시보드) 구현. `fetch`/`EventSource` 호출엔 `credentials:'include'`/`withCredentials:true` 필요.

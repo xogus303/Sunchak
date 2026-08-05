@@ -5,13 +5,16 @@ import {
   HttpStatus,
   MessageEvent,
   Post,
+  Res,
   Sse,
 } from '@nestjs/common';
+import { Response } from 'express';
 import { Observable } from 'rxjs';
 import { DemoService } from './demo.service';
 import { GateDto } from './dto/gate.dto';
 import { SimulateDto } from './dto/simulate.dto';
 import { Public } from '../common/decorators/public.decorator';
+import { authCookieOptions, DEMO_TOKEN_COOKIE } from '../common/auth-cookie';
 
 @Controller('demo')
 export class DemoController {
@@ -21,8 +24,16 @@ export class DemoController {
   // 발급받을 수 있다(닭이 먼저냐 달걀이 먼저냐 문제 회피).
   @Public()
   @Post('gate')
-  enterGate(@Body() dto: GateDto) {
-    return this.demoService.enterGate(dto.password);
+  async enterGate(
+    @Body() dto: GateDto,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const result = await this.demoService.enterGate(dto.password);
+    // 쿠키(브라우저 EventSource·fetch가 자동 전송)로도 심는다 — JSON 응답의
+    // demoToken은 curl 등 수동 검증용으로 그대로 유지(passthrough:true라 이
+    // return 값을 Nest가 여전히 알아서 직렬화해 응답 본문에 담는다).
+    res.cookie(DEMO_TOKEN_COOKIE, result.demoToken, authCookieOptions());
+    return result;
   }
 
   // ⚠️ 데모 전용, 파괴적 엔드포인트(예매 전체 삭제 + 재고 원복).

@@ -8,6 +8,7 @@ import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { Reflector } from '@nestjs/core';
 import { IS_PUBLIC_KEY } from '../../common/decorators/public.decorator';
+import { DEMO_TOKEN_COOKIE } from '../../common/auth-cookie';
 import { DemoGatePayload } from '../demo.service';
 
 /**
@@ -41,7 +42,9 @@ export class DemoGateGuard implements CanActivate {
     }
 
     const request = context.switchToHttp().getRequest();
-    const token = request.headers['x-demo-token'];
+    // 쿠키(브라우저 자동 전송) 우선, 없으면 헤더(curl 등 수동 검증용) — JWT와 같은 원칙.
+    const token: unknown =
+      request.cookies?.[DEMO_TOKEN_COOKIE] ?? request.headers['x-demo-token'];
     if (!token || typeof token !== 'string') {
       throw new UnauthorizedException('데모 게이트를 먼저 통과하세요.');
     }

@@ -1,0 +1,15 @@
+packages:
+  - "apps/*"
+# 네이티브 postinstall 스크립트 허용 목록. Prisma/argon2는 실제 동작에 필수(true).
+# msgpackr-extract·unrs-resolver는 순수 네이티브 최적화라 없어도 JS로 폴백된다
+# (apps/api 단독 개발 때 이미 이렇게 판단해 STATUS.md에 기록된 결정과 동일).
+allowBuilds:
+  '@prisma/client': true
+  '@prisma/engines': true
+  argon2: true
+  msgpackr-extract: false
+  prisma: true
+  unrs-resolver: false
+  # sharp: next/image의 프로덕션 이미지 최적화가 쓰는 표준 라이브러리(Next.js 공식
+  # 권장) — 위 둘(순수 성능 최적화, JS 폴백 존재)과 달리 없으면 기능이 저하되므로 승인.
+  sharp: true

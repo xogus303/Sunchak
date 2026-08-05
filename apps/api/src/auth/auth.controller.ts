@@ -5,8 +5,10 @@ import {
   HttpCode,
   HttpStatus,
   Post,
+  Res,
   UseGuards,
 } from '@nestjs/common';
+import { Response } from 'express';
 import { User } from '@prisma/client';
 import { AuthService } from './auth.service';
 import { SignupDto } from './dto/signup.dto';
@@ -15,6 +17,7 @@ import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { GoogleAuthGuard } from './guards/google-auth.guard';
 import { CurrentUser } from './decorators/current-user.decorator';
 import { Public } from '../common/decorators/public.decorator';
+import { ACCESS_TOKEN_COOKIE, authCookieOptions } from '../common/auth-cookie';
 
 /**
  * 컨트롤러 = HTTP 입구. 요청을 받아 서비스에 넘기고 결과를 응답한다.
@@ -33,8 +36,15 @@ export class AuthController {
   // POST /auth/login → 리소스 생성이 아니므로 200 OK로 명시
   @HttpCode(HttpStatus.OK)
   @Post('login')
-  login(@Body() dto: LoginDto) {
-    return this.authService.login(dto);
+  async login(
+    @Body() dto: LoginDto,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const result = await this.authService.login(dto);
+    // 쿠키(브라우저 자동 전송)로도 심는다 — JSON의 accessToken은 curl 등
+    // 수동 검증용으로 유지(passthrough:true라 이 return 값이 응답 본문에 그대로 담긴다).
+    res.cookie(ACCESS_TOKEN_COOKIE, result.accessToken, authCookieOptions());
+    return result;
   }
 
   // GET /auth/me → 유효한 JWT가 있어야만 접근. 없으면 가드가 401.
@@ -55,12 +65,14 @@ export class AuthController {
 
   // GET /auth/google/callback → Google이 리다이렉트로 돌아오는 지점.
   // 가드가 GoogleStrategy.validate()까지 실행해 req.user에 우리 User를 담아준다.
+  // 여기선 @Res({passthrough:true})가 아니라 @Res() 그대로 받는다 — Nest의
+  // 자동 응답 직렬화 대신 res.redirect()로 직접 응답을 끝내야 하므로.
   @Public()
   @UseGuards(GoogleAuthGuard)
   @Get('google/callback')
-  async googleCallback(@CurrentUser() user: User) {
-    // TODO(프론트 생기면): 토큰을 쿼리파라미터/쿠키로 실어 프론트 URL로
-    // 리다이렉트. 지금은 apps/web이 없어 JSON으로 바로 반환(임시, 확인용).
-    return this.authService.issueToken(user);
+  async googleCallback(@CurrentUser() user: User, @Res() res: Response) {
+    const { accessToken } = await this.authService.issueToken(user);
+    res.cookie(ACCESS_TOKEN_COOKIE, accessToken, authCookieOptions());
+    res.redirect(process.env.WEB_APP_URL ?? 'http://localhost:3000');
   }
 }
