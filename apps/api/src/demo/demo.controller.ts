@@ -1,6 +1,7 @@
-import { Body, Controller, Post } from '@nestjs/common';
+import { Body, Controller, HttpCode, HttpStatus, Post } from '@nestjs/common';
 import { DemoService } from './demo.service';
 import { GateDto } from './dto/gate.dto';
+import { SimulateDto } from './dto/simulate.dto';
 import { Public } from '../common/decorators/public.decorator';
 
 @Controller('demo')
@@ -20,5 +21,14 @@ export class DemoController {
   @Post('reset')
   reset() {
     return this.demoService.resetDemoEvent();
+  }
+
+  // 서버측 부하 시뮬레이션(ADR 0016 축 B-1). 상한·쿨다운 통과 즉시 202로
+  // 응답하고, 실제 투입은 백그라운드에서 진행한다(진행 상황은 축 B-2 SSE 몫).
+  // 전역 게이트 가드로 보호 — 게이트 통과자라면 누구든 호출 가능(쿨다운은 전역 공유).
+  @Post('simulate')
+  @HttpCode(HttpStatus.ACCEPTED)
+  simulate(@Body() dto: SimulateDto) {
+    return this.demoService.simulateLoad(dto.virtualUserCount);
   }
 }

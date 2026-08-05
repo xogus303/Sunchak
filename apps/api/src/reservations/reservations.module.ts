@@ -48,5 +48,7 @@ import { CONFIRM_QUEUE, RECONCILE_QUEUE, SWEEP_QUEUE } from './reservations.cons
     SweepProcessor,
     ReconcileProcessor,
   ],
+  // DemoModule의 시뮬레이션(축 B-1)이 가상 유저의 예매를 이 서비스로 흘려보낸다.
+  exports: [ReservationsService],
 })
 export class ReservationsModule {}

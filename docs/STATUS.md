@@ -5,7 +5,7 @@
 > - **세션 시작 시**: 이 파일을 가장 먼저 읽고 "다음 할 일"부터 이어간다.
 > - **세션 끝 / 커밋 전**: 이 파일을 **덮어써서** 최신 상태로 갱신한다. (시간순 이력·삽질은 `DEVLOG.md`, 결정 근거는 `decisions/`)
 
-**마지막 업데이트:** 2026-08-01 (**W3 전체 완료 + W4 데이터 리셋/seed/진입 게이트/Google SSO 구현·검증 완료**. **다음은 W4 서버측 시뮬레이션(축 B-1)**)
+**마지막 업데이트:** 2026-08-05 (**W4 서버측 부하 시뮬레이션(축 B-1) 구현·검증 완료**. **다음은 W4 실시간 stats 대시보드(축 B-2)**)
 
 ---
 
@@ -55,18 +55,22 @@
   - **삽질**: `clientID`에 빈 문자열 fallback을 썼다가 `passport-oauth2`가 생성자에서 throw해 **앱 부팅이 죽는** 버그 발견 → `'not-configured'` 같은 비어있지 않은 플레이스홀더로 수정.
   - **새 env 3개**: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_CALLBACK_URL`(`.env.example` 반영). 사용자가 Google Cloud Console에서 OAuth 클라이언트 직접 발급.
   - **테스트**: `auth.service.spec.ts` 4건 추가. **전체 37→41 그린.** 실제 Google 계정으로 브라우저 로그인 end-to-end 검증(토큰 발급 → `/auth/me` 통과 → DB에 `password IS NULL` 계정 생성 확인).
+- **✅ W4 서버측 부하 시뮬레이션 구현·검증 완료 (2026-08-05, ADR 0016 축 B-1, 같은 날 개정)**: "가상 유저 N명 투입" 버튼의 백엔드.
+  - **설계 확정(ADR 0016 2026-08-05 개정 참고)**: 투입 리듬=묶음(batch) 발사(20명×300ms 간격, 순수 동시/순수 순차 둘 다 이 프로젝트 목적에 안 맞아 절충), 가상 유저=실제 `User` 레코드 생성(`Reservation.userId`가 FK라 가짜 id 불가), 쿨다운=백엔드 Redis 강제 유지(신뢰 경계 원칙), 가상 유저는 이메일 접두사(`sim-`)로 식별해 리셋 시 함께 삭제.
+  - **구현**: `ReservationsModule`이 `ReservationsService`를 `exports` → `DemoService`가 실제 파이프라인(`create(..., 'held', ...)`)을 그대로 재사용(시뮬 전용 우회 경로 없음, 진짜 동시성 경합 재현). `DemoService.simulateLoad()`(상한 검사→Redis `SET NX PX` 쿨다운→202 즉시 응답→`void`로 fire-and-forget 배치 투입) + `runSimulationBatches`/`injectVirtualUser`(재고 소진은 정상 시나리오로 조용히 넘김). `resetDemoEvent()`에 `sim-` User 정리 추가. `POST /demo/simulate` 신규(전역 게이트 가드로 이미 보호).
+  - **테스트**: `demo.service.spec.ts` 4건 추가(상한 400, 정상 202+백그라운드 투입 확인, 쿨다운 429, 리셋 시 `sim-`만 삭제). **전체 41→45 그린.** 실서버 e2e 수동 검증도 완료(45명 시뮬 → Redis 재고 100→55, 45건 전부 CONFIRMED, `sim-` User 45건 생성 → 리셋 후 전부 원복 확인).
+  - **아직 결과를 볼 방법이 curl/DB 조회뿐** — 축 B-2(stats SSE)가 붙어야 방문자가 이 과정을 실시간으로 지켜볼 수 있다.
 
 ## 🔨 진행 중 / 막힌 것
 - (막힌 것 없음.)
 - 장시간 테스트 시 JWT(1h) 만료 주의 → 재로그인으로 토큰 갱신.
 
 ## ▶️ 다음 할 일 (이 순서로)
-1. ✅ ~~W1~~ / ✅ ~~W2 + ADR 0014~~ / ✅ ~~W3 전체(설계+2.2~2.5) + ADR 0015~~ / ✅ ~~W4 데이터 리셋+seed~~ / ✅ ~~W4 진입 게이트~~ / ✅ ~~Google SSO~~ — 여기까지 완료.
-2. **W4 서버측 부하 시뮬레이션 (축 B-1)** — 가상 유저 N명 투입 엔드포인트 + 상한(`DEMO_SIM_MAX_VU`)·쿨다운(Redis, `DEMO_SIM_COOLDOWN_MS`).
-3. **W4 실시간 stats 대시보드 (축 B-2)** — 2.4의 `@Sse`+`Subject` 배관 재사용, 재고/HELD/CONFIRMED/큐 적체 스트리밍.
-4. **W4 프론트엔드(apps/web)** — 게이트 화면 + Google 로그인 버튼 + 데모 컨트롤 화면. 백엔드 조각들이 갖춰진 뒤("서버 먼저" 원칙).
-5. **배포** — Neon(이미 있음)·무료/저가 VM·Vercel 등. **배포 시 `GOOGLE_CALLBACK_URL`을 실제 도메인으로, Google Cloud Console의 승인된 리디렉션 URI도 함께 갱신 필요.**
-6. (선택) `Payment.idempotencyKey`도 단독 unique — 같은 유출 문제 가능. 결제 단계에서 재검토(아직 Payment API 자체가 미구현).
+1. ✅ ~~W1~~ / ✅ ~~W2 + ADR 0014~~ / ✅ ~~W3 전체(설계+2.2~2.5) + ADR 0015~~ / ✅ ~~W4 데이터 리셋+seed~~ / ✅ ~~W4 진입 게이트~~ / ✅ ~~Google SSO~~ / ✅ ~~W4 서버측 부하 시뮬레이션(축 B-1)~~ — 여기까지 완료.
+2. **W4 실시간 stats 대시보드 (축 B-2)** — 2.4의 `@Sse`+`Subject` 배관 재사용, 재고/HELD/CONFIRMED/큐 적체 스트리밍. 축 B-1 시뮬레이션 결과를 방문자가 실시간으로 볼 수 있게 하는 게 목적.
+3. **W4 프론트엔드(apps/web)** — 게이트 화면 + Google 로그인 버튼 + 데모 컨트롤 화면. 백엔드 조각들이 갖춰진 뒤("서버 먼저" 원칙).
+4. **배포** — Neon(이미 있음)·무료/저가 VM·Vercel 등. **배포 시 `GOOGLE_CALLBACK_URL`을 실제 도메인으로, Google Cloud Console의 승인된 리디렉션 URI도 함께 갱신 필요.**
+5. (선택) `Payment.idempotencyKey`도 단독 unique — 같은 유출 문제 가능. 결제 단계에서 재검토(아직 Payment API 자체가 미구현).
 
 ## 🖥️ 이 기기(현재) 로컬 환경 — 재세팅 시 주의
 - **Node 버전**: 활성 `node`가 v22.12.0이면 pnpm(v22.13+ 요구)이 거부한다. **nvm의 v22.23.1 사용**: 명령 앞에 `export PATH="$HOME/.nvm/versions/node/v22.23.1/bin:$PATH"` 붙이거나 `nvm use v22.23.1`.
@@ -77,7 +81,7 @@
 - **seed 스크립트 실행**: `prisma db seed`가 내부적으로 `ts-node`를 PATH에서 찾는데, `./node_modules/.bin/prisma`처럼 바이너리를 직접 호출하면 PATH에 `node_modules/.bin`이 없어 `ENOENT` 에러가 난다. `export PATH="$(pwd)/node_modules/.bin:$PATH"`를 먼저 붙이거나 `pnpm exec prisma db seed` 사용.
 
 ## 🧪 테스트 실행법
-- `cd apps/api && pnpm exec jest`(전체 41개) 또는 `pnpm exec jest reservations`(held+SSE+sweep+reconcile 통합 16개) · `pnpm exec jest demo`(리셋+게이트 13개) · `pnpm exec jest auth`(회원가입/로그인/Google SSO 9개). 사전조건: 로컬 PG·Redis 기동.
+- `cd apps/api && pnpm exec jest`(전체 45개) 또는 `pnpm exec jest reservations`(held+SSE+sweep+reconcile 통합 16개) · `pnpm exec jest demo`(리셋+게이트+시뮬레이션 17개) · `pnpm exec jest auth`(회원가입/로그인/Google SSO 9개). 사전조건: 로컬 PG·Redis 기동.
 - ⚠️ 실DB를 쓰는 통합 스펙 파일이 여러 개(reservations/sweep/reconcile/demo)라 **`maxWorkers: 1`(package.json jest 설정)로 직렬 실행** — 병렬 실행 시 서로의 `beforeEach` 전체삭제가 충돌한다(2.5에서 발견).
 - ⚠️ **`pnpm exec`가 막히면**: bullmq의 선택적 네이티브 빌드(`msgpackr-extract`)가 스킵돼 pnpm의 실행 전 deps 점검이 실패할 수 있다. 우회 = 바이너리 직접 호출 `./node_modules/.bin/jest`, `./node_modules/.bin/tsc --noEmit`. (기능 무해 — JS로 폴백. 원하면 `pnpm approve-builds`로 승인.)
 - W2 벤치: 서버(`pnpm start:dev`)+로컬 PG 기동, admin 계정 존재 확인 후 `ADMIN_PASSWORD=... bash apps/api/test/load/bench.sh`.

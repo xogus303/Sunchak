@@ -325,3 +325,20 @@
 - **새 env 3개**: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_CALLBACK_URL`. `.env.example` 반영. 사용자가 직접 Google Cloud Console에서 OAuth 클라이언트를 발급(OAuth 동의 화면 → 테스트 사용자 등록 → 웹 애플리케이션 클라이언트 → 리디렉션 URI 등록)하고 `.env`에 값을 채움.
 - **테스트**: `auth.service.spec.ts`에 4건 추가(null-password 로그인 401, `findOrCreateGoogleUser` 3건). **전체 37→41 그린.** 실제 Google Cloud Console 발급 자격증명으로 **브라우저에서 실제 로그인까지 end-to-end 검증** — 발급된 토큰으로 `/auth/me` 통과 확인, DB에 `password IS NULL` 계정 생성 확인.
 - **다음**: W4 서버측 부하 시뮬레이션(축 B-1, 게이트를 통과한 방문자가 자기 계정으로 직접 예매도 가능해졌으니 시뮬레이션과 나란히 노출 가능) → stats SSE(축 B-2) → 프론트엔드(apps/web) → 배포.
+
+## 2026-08-05 · W4 서버측 부하 시뮬레이션 (ADR 0016 축 B-1)
+
+- **설계 논의(사용자 발, ADR 0016에 2026-08-05 개정으로 반영)**: 세부 4가지를 이 세션에서 확정.
+  1. **투입 리듬**: 처음엔 "점진적"(순차)으로 답이 나왔으나, 이 프로젝트의 목적(W2가 증명한 "동시 쓰기 경합")을 다시 짚으면서 재검토 — 순수 순차 투입은 동시성 경합 자체가 안 걸리고, 순수 동시 발사는 Redis 원자 감산이 워낙 빨라 대시보드가 보여줄 새도 없이 끝난다. **묶음(batch) 발사**로 절충(짧은 간격마다 일정 묶음을 동시 발사) — 묶음 안은 진짜 동시 요청, 묶음 사이 간격은 사람이 눈으로 따라갈 여유.
+  2. **가상 유저 신원**: "가짜 값 먼저 시도"로 나온 답을, 스키마 확인(`Reservation.userId`가 `User` FK) 결과 가짜 id는 **시도할 필요 없이 확정적으로 실패**함을 짚어 바로 "가상 유저마다 실제 `User` 레코드 생성"으로 확정.
+  3. **쿨다운 강제 위치**: "프론트 버튼으로 수동 처리"라는 초기 답이 ADR 자체의 "신뢰 경계는 백엔드"(§A와 동일 논리) 원칙과 상충할 수 있어 재확인 → **백엔드 Redis 쿨다운 유지 + 프론트는 그 결과(429)만 반영**으로 정리(스코프는 전역 — 게이트 통과자면 누구든).
+  4. **가상 유저 정리**: 재고/예매 리셋(§C)만으론 시뮬레이션이 만든 `User` 행이 무료 티어 DB에 리셋마다 계속 쌓인다는 점을 짚어, 이메일 접두사(`sim-`)로 식별해 리셋 시 함께 삭제하도록 추가(스키마 변경 없이 `isDemo` 식별 취지 재사용).
+- **구현**:
+  - `ReservationsModule`이 `ReservationsService`를 `exports`(기존엔 모듈 내부 전용) → `DemoModule`이 이를 import해 가상 유저의 예매를 실제 파이프라인(`create(eventId, userId, 1, 'held', idempotencyKey)`)으로 그대로 흘림. 시뮬레이션 전용 우회 경로를 새로 안 만들고 **실제 서비스 코드를 재사용**하는 게 핵심 — 그래야 이 시뮬레이션이 "진짜" 동시성 문제를 재현한다.
+  - `DemoService.simulateLoad()`: ①`DEMO_SIM_MAX_VU` 상한 검사 ②Redis `SET NX PX`로 쿨다운을 원자적 확인+잠금(확인과 잠금을 분리하면 그 사이 경합 가능) ③데모 이벤트 조회 ④`202` 즉시 응답, 실제 투입은 `void`로 fire-and-forget(컨트롤러가 기다리지 않음, 실패는 `Logger.error`로만).
+  - `runSimulationBatches`: `SIM_BATCH_SIZE=20`·`SIM_BATCH_INTERVAL_MS=300` 상수로 묶음 발사. `injectVirtualUser`: `sim-<uuid>@sunchak.demo`·`password:null` User 생성 후 `held` 전략 호출. 재고 소진(`ConflictException`)은 이 데모가 보여주려는 정상 시나리오라 조용히 넘기고, 그 외 예외만 로그.
+  - `resetDemoEvent()`에 `sim-` 접두사 `User` 삭제 추가(예매 삭제 다음 순서 — FK 걱정 없이 지울 수 있게).
+  - `POST /demo/simulate`(`SimulateDto`, `@HttpCode(202)`) — 전역 게이트 가드가 이미 보호(별도 가드 불필요, `reset`과 같은 패턴).
+- **검증**: 유닛 테스트 4건 추가(`demo.service.spec.ts` — 상한 초과 400, 정상 요청 202+백그라운드 실제 투입, 쿨다운 중 429, 리셋 시 `sim-` 유저만 삭제·일반 유저는 보존). `ReservationsService`는 모킹(큐 인프라까지 테스트 모듈에 안 들여도 됨). **전체 41→45 그린.**
+  - **실제 서버로 e2e 수동 검증**(모킹 없이): seed 후 `POST /demo/simulate {virtualUserCount:45}` → 72ms만에 202 응답 확인(블로킹 안 됨) → 3초 후 Redis `stock:event:254` 100→55, DB `reservations` 45건 전부 CONFIRMED(워커가 이미 처리), `sim-` User 45건 생성 확인. 즉시 재요청은 429(쿨다운) 확인. 301명 요청은 400(상한) 확인. `POST /demo/reset` 후 `sim-` User·예매 0건, Redis 재고 100 원복 확인.
+- **다음**: W4 실시간 stats 대시보드(축 B-2) — 2.4의 `@Sse`+`Subject` 배관을 재사용해 재고·HELD/CONFIRMED·큐 적체를 스트리밍. 지금 시뮬레이션은 결과를 curl로만 확인했지만, B-2가 붙으면 방문자가 이 과정을 실시간으로 지켜볼 수 있게 된다.
