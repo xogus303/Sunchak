@@ -5,6 +5,7 @@ import { PassportModule } from '@nestjs/passport';
 import { AuthService } from './auth.service';
 import { AuthController } from './auth.controller';
 import { JwtStrategy } from './strategies/jwt.strategy';
+import { GoogleStrategy } from './strategies/google.strategy';
 
 /**
  * 모듈 = 관련된 컨트롤러·서비스·전략을 하나로 묶는 단위.
@@ -26,7 +27,7 @@ import { JwtStrategy } from './strategies/jwt.strategy';
     }),
   ],
   controllers: [AuthController],
-  providers: [AuthService, JwtStrategy],
+  providers: [AuthService, JwtStrategy, GoogleStrategy],
   // DemoModule의 게이트 가드가 데모 토큰을 sign/verify하려고 JwtService가 필요
   // 하다 — 같은 JWT_SECRET을 재사용(새 시크릿 불필요, payload의 `type` 필드로
   // 로그인 토큰과 구분).

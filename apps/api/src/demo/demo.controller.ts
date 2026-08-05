@@ -1,7 +1,7 @@
 import { Body, Controller, Post } from '@nestjs/common';
 import { DemoService } from './demo.service';
 import { GateDto } from './dto/gate.dto';
-import { Public } from './decorators/public.decorator';
+import { Public } from '../common/decorators/public.decorator';
 
 @Controller('demo')
 export class DemoController {

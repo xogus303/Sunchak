@@ -74,6 +74,57 @@ describe('AuthService', () => {
         role: 'USER',
       });
     });
+
+    it('Google로 가입해 password가 null인 계정은 비번 로그인 시 401(크래시 아님)', async () => {
+      jest.clearAllMocks(); // 이전 테스트들의 argon2.verify 호출 기록을 지운다
+      prisma.user.findUnique.mockResolvedValue({
+        id: 1,
+        email: 'google-user@x.com',
+        password: null, // Google 계정
+        role: 'USER',
+      });
+
+      await expect(
+        service.login({ email: 'google-user@x.com', password: 'anything' }),
+      ).rejects.toBeInstanceOf(UnauthorizedException);
+      expect(argon2.verify).not.toHaveBeenCalled(); // null과 비교 시도조차 안 함
+    });
+  });
+
+  describe('findOrCreateGoogleUser', () => {
+    const profile = { emails: [{ value: 'google-user@x.com', verified: true }] } as any;
+
+    it('이미 같은 이메일의 유저가 있으면 그대로 반환한다(새로 안 만듦)', async () => {
+      const existing = { id: 5, email: 'google-user@x.com', password: null, role: 'USER' };
+      prisma.user.findUnique.mockResolvedValue(existing);
+
+      const result = await service.findOrCreateGoogleUser(profile);
+
+      expect(result).toBe(existing);
+      expect(prisma.user.create).not.toHaveBeenCalled();
+    });
+
+    it('처음 보는 이메일이면 password=null로 새 유저를 만든다', async () => {
+      prisma.user.findUnique.mockResolvedValue(null);
+      prisma.user.create.mockResolvedValue({
+        id: 6,
+        email: 'google-user@x.com',
+        password: null,
+        role: 'USER',
+      });
+
+      await service.findOrCreateGoogleUser(profile);
+
+      expect(prisma.user.create).toHaveBeenCalledWith({
+        data: { email: 'google-user@x.com', password: null },
+      });
+    });
+
+    it('Google 프로필에 이메일이 없으면 401을 던진다', async () => {
+      await expect(
+        service.findOrCreateGoogleUser({ emails: [] } as any),
+      ).rejects.toBeInstanceOf(UnauthorizedException);
+    });
   });
 
   describe('signup', () => {

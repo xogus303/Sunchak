@@ -312,3 +312,16 @@
   - **`/health`**에 `@Public()` — 인프라 모니터링이 데모 토큰을 가질 수 없으므로.
 - **테스트**: `DemoGateGuard`는 실제 HTTP/DB 없이 `canActivate()`만 검증하는 순수 단위 테스트(가짜 `ExecutionContext`)로 작성 — supertest 같은 e2e 의존성을 새로 안 들여도 충분(6건). `DemoService.enterGate`도 통합 테스트 3건 추가. **전체 28→37 그린.** 서버 기동 후 curl로 5단계(헬스체크 공개→토큰 없이 차단→틀린 비번 거부→올바른 비번 발급→토큰으로 통과) 전부 수동 검증, 비번 미설정 시 자동 우회도 별도 확인.
 - **다음**: 방문자 식별/예매 방식 결정(위 "논의가 세 번 바뀜" 참고, 별도 ADR 검토) → W4 서버측 부하 시뮬레이션(축 B-1) → stats SSE(축 B-2) → 프론트엔드(apps/web) → 배포.
+
+## 2026-08-01 · 방문자 예매 인증 — Google SSO 도입
+
+- **결정**: 세 번 바뀌었던 방문자 식별 방식(admin 불필요 → 게스트 → Google SSO) 논의를 오늘 마무리. 기존 이메일/비번 로그인(W1, 새 코드 불필요) 재사용을 더 단순한 대안으로 제안했으나, **사용자가 Google SSO를 명시적으로 선택**해 그대로 진행.
+- **개념**: OAuth 2.0 authorization code flow. 이메일/비번 로그인과 달리 **브라우저 리다이렉트가 필수**(①`/auth/google`→Google 로그인 페이지 ②Google이 code를 실어 `/auth/google/callback`으로 되돌림 ③서버가 code로 프로필을 받아 자체 JWT 발급). API 요청 하나로 끝나지 않는다는 점이 지금까지의 JSON API 패턴과 다름.
+- **⚠️ 설계 중 발견 — 게이트와의 충돌**: 브라우저의 페이지 이동(리다이렉트)은 커스텀 헤더(`X-Demo-Token`)를 못 붙인다. `/auth/google`과 `/auth/google/callback`은 구조적으로 게이트를 우회(`@Public()`)해야만 동작 — 로그인 "시작"은 게이트 없이 가능해지지만, 실제 비용이 드는 작업(예매 등)은 여전히 게이트+로그인 토큰 둘 다 필요해 안전하다고 판단하고 진행.
+- **스키마**: `User.password`를 `String?`(nullable)로 변경(마이그레이션 `20260801133308_user_password_nullable_for_google`) — Google 계정은 비밀번호가 없음.
+- **정직한 버그 하나(구현 중 발견)**: `GoogleStrategy`가 `clientID: '' `처럼 빈 문자열 fallback을 쓰면 `passport-oauth2`가 생성자에서 바로 throw해 **앱 부팅 자체가 죽었다**(JWT_SECRET처럼 "설정 안 해도 부팅은 된다"를 의도했는데 반대로 동작). 빈 문자열이 아니라 `'not-configured'` 같은 의미 있는 플레이스홀더로 고쳐 해결 — 미설정 시에도 부팅은 되고, 실제 `/auth/google` 시도 시에만 Google이 invalid_client로 거부한다.
+- **구현**: `google.strategy.ts`(신규, `passport-google-oauth20`), `GoogleAuthGuard`(`AuthGuard('google')`), `AuthController`에 `GET /auth/google`(리다이렉트 시작)·`GET /auth/google/callback`(토큰 발급, 프론트 없어 지금은 JSON 직접 반환). `AuthService`에 `findOrCreateGoogleUser()`(이메일로 찾거나 `password:null`로 생성) + `login()`/Google 콜백이 공유하는 `issueToken()` 추출. `login()`에 `!user.password` 가드 추가(Google 전용 계정으로 비번 로그인 시 `argon2.verify(null,...)` 크래시 대신 깔끔한 401).
+- **작은 리팩터**: `@Public()` 데코레이터가 `demo/`뿐 아니라 `auth/`(Google 라우트)에서도 필요해져 `common/decorators/`로 이동 — demo 전용이 아니라 앱 전역 관심사였음이 드러남.
+- **새 env 3개**: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_CALLBACK_URL`. `.env.example` 반영. 사용자가 직접 Google Cloud Console에서 OAuth 클라이언트를 발급(OAuth 동의 화면 → 테스트 사용자 등록 → 웹 애플리케이션 클라이언트 → 리디렉션 URI 등록)하고 `.env`에 값을 채움.
+- **테스트**: `auth.service.spec.ts`에 4건 추가(null-password 로그인 401, `findOrCreateGoogleUser` 3건). **전체 37→41 그린.** 실제 Google Cloud Console 발급 자격증명으로 **브라우저에서 실제 로그인까지 end-to-end 검증** — 발급된 토큰으로 `/auth/me` 통과 확인, DB에 `password IS NULL` 계정 생성 확인.
+- **다음**: W4 서버측 부하 시뮬레이션(축 B-1, 게이트를 통과한 방문자가 자기 계정으로 직접 예매도 가능해졌으니 시뮬레이션과 나란히 노출 가능) → stats SSE(축 B-2) → 프론트엔드(apps/web) → 배포.

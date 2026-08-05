@@ -5,7 +5,7 @@
 > - **세션 시작 시**: 이 파일을 가장 먼저 읽고 "다음 할 일"부터 이어간다.
 > - **세션 끝 / 커밋 전**: 이 파일을 **덮어써서** 최신 상태로 갱신한다. (시간순 이력·삽질은 `DEVLOG.md`, 결정 근거는 `decisions/`)
 
-**마지막 업데이트:** 2026-08-01 (**W3 전체 완료 + W4 데이터 리셋/seed/진입 게이트 구현·검증 완료**. **다음은 방문자 식별 방식 결정 → W4 서버측 시뮬레이션**)
+**마지막 업데이트:** 2026-08-01 (**W3 전체 완료 + W4 데이터 리셋/seed/진입 게이트/Google SSO 구현·검증 완료**. **다음은 W4 서버측 시뮬레이션(축 B-1)**)
 
 ---
 
@@ -48,30 +48,36 @@
   - **구현**: `POST /demo/gate`(비번검증→토큰발급, `@Public()`으로 가드 우회) + `DemoGateGuard`(`APP_GUARD`로 전역 등록, `@Public()` 없는 모든 라우트에 적용) + `/health`에 `@Public()`. **`DEMO_GATE_PASSWORD` 미설정 시 게이트 자동 비활성화**(로컬 개발·기존 스크립트 안 깨지게).
   - **⚠️ 방문자 식별 방식 미정**: 게이트 설계 중 "방문자가 직접 예매 가능해야 한다"가 새로 나왔는데, 그 방식(로그인 없는 게스트 vs Google SSO 등)이 세 번 바뀌다 **오늘 범위에서 분리**됐다. 다음 세션에서 결정 필요(ADR 0013과 연관, 새 ADR 검토).
   - **테스트**: `DemoGateGuard` 순수 단위 테스트 6건(가짜 `ExecutionContext`, DB/HTTP 불필요) + `enterGate` 통합 테스트 3건. **전체 28→37 그린.** curl로 5단계 전체 흐름(공개→차단→거부→발급→통과) + 비번 미설정 시 자동 우회 수동 검증.
+- **✅ 방문자 예매 인증 — Google SSO 구현·검증 완료 (2026-08-01)**: 방문자 식별 방식 논의(admin 불필요→게스트→Google SSO) 최종 확정.
+  - **스키마**: `User.password String?`(nullable, 마이그레이션 완료) — Google 계정은 비밀번호 없음. `AuthService.login()`에 null-password 가드 추가(크래시 대신 401).
+  - **구현**: `google.strategy.ts`+`GoogleAuthGuard`(신규) + `AuthController`에 `GET /auth/google`(리다이렉트 시작)·`GET /auth/google/callback`(토큰 발급, 프론트 없어 지금은 JSON 직접 반환) + `AuthService.findOrCreateGoogleUser()`. `@Public()` 데코레이터를 `demo/`→`common/decorators/`로 이동(auth에서도 필요해짐).
+  - **⚠️ 게이트와의 구조적 충돌**: 브라우저 리다이렉트는 커스텀 헤더를 못 붙여 `/auth/google`·`/auth/google/callback`은 `@Public()`으로 게이트 우회(의도적 — 로그인 "시작"만 게이트 없이 가능, 실제 예매는 여전히 게이트+로그인 토큰 둘 다 필요).
+  - **삽질**: `clientID`에 빈 문자열 fallback을 썼다가 `passport-oauth2`가 생성자에서 throw해 **앱 부팅이 죽는** 버그 발견 → `'not-configured'` 같은 비어있지 않은 플레이스홀더로 수정.
+  - **새 env 3개**: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_CALLBACK_URL`(`.env.example` 반영). 사용자가 Google Cloud Console에서 OAuth 클라이언트 직접 발급.
+  - **테스트**: `auth.service.spec.ts` 4건 추가. **전체 37→41 그린.** 실제 Google 계정으로 브라우저 로그인 end-to-end 검증(토큰 발급 → `/auth/me` 통과 → DB에 `password IS NULL` 계정 생성 확인).
 
 ## 🔨 진행 중 / 막힌 것
 - (막힌 것 없음.)
-- **⚠️ 방문자 식별/예매 방식 미정**: "방문자가 직접 예매 가능"은 확정됐지만 그 인증 방식(게스트 vs Google SSO 등)은 미정 — 다음 작업의 전제.
 - 장시간 테스트 시 JWT(1h) 만료 주의 → 재로그인으로 토큰 갱신.
 
 ## ▶️ 다음 할 일 (이 순서로)
-1. ✅ ~~W1~~ / ✅ ~~W2 + ADR 0014~~ / ✅ ~~W3 전체(설계+2.2~2.5) + ADR 0015~~ / ✅ ~~W4 데이터 리셋+seed~~ / ✅ ~~W4 진입 게이트~~ — 여기까지 완료.
-2. **방문자 식별/예매 방식 결정** — 게스트(로그인 없음) vs Google SSO 등. 확정되면 ADR로 남기고, 필요 시 `POST /reservations`의 `JwtAuthGuard` 의존을 재설계.
-3. **W4 서버측 부하 시뮬레이션 (축 B-1)** — 가상 유저 N명 투입 엔드포인트 + 상한(`DEMO_SIM_MAX_VU`)·쿨다운(Redis, `DEMO_SIM_COOLDOWN_MS`).
-4. **W4 실시간 stats 대시보드 (축 B-2)** — 2.4의 `@Sse`+`Subject` 배관 재사용, 재고/HELD/CONFIRMED/큐 적체 스트리밍.
-5. **W4 프론트엔드(apps/web)** — 게이트 화면 + 데모 컨트롤 화면. 백엔드 조각들이 갖춰진 뒤("서버 먼저" 원칙).
-6. **배포** — Neon(이미 있음)·무료/저가 VM·Vercel 등.
-7. (선택) `Payment.idempotencyKey`도 단독 unique — 같은 유출 문제 가능. 결제 단계에서 재검토(아직 Payment API 자체가 미구현).
+1. ✅ ~~W1~~ / ✅ ~~W2 + ADR 0014~~ / ✅ ~~W3 전체(설계+2.2~2.5) + ADR 0015~~ / ✅ ~~W4 데이터 리셋+seed~~ / ✅ ~~W4 진입 게이트~~ / ✅ ~~Google SSO~~ — 여기까지 완료.
+2. **W4 서버측 부하 시뮬레이션 (축 B-1)** — 가상 유저 N명 투입 엔드포인트 + 상한(`DEMO_SIM_MAX_VU`)·쿨다운(Redis, `DEMO_SIM_COOLDOWN_MS`).
+3. **W4 실시간 stats 대시보드 (축 B-2)** — 2.4의 `@Sse`+`Subject` 배관 재사용, 재고/HELD/CONFIRMED/큐 적체 스트리밍.
+4. **W4 프론트엔드(apps/web)** — 게이트 화면 + Google 로그인 버튼 + 데모 컨트롤 화면. 백엔드 조각들이 갖춰진 뒤("서버 먼저" 원칙).
+5. **배포** — Neon(이미 있음)·무료/저가 VM·Vercel 등. **배포 시 `GOOGLE_CALLBACK_URL`을 실제 도메인으로, Google Cloud Console의 승인된 리디렉션 URI도 함께 갱신 필요.**
+6. (선택) `Payment.idempotencyKey`도 단독 unique — 같은 유출 문제 가능. 결제 단계에서 재검토(아직 Payment API 자체가 미구현).
 
 ## 🖥️ 이 기기(현재) 로컬 환경 — 재세팅 시 주의
 - **Node 버전**: 활성 `node`가 v22.12.0이면 pnpm(v22.13+ 요구)이 거부한다. **nvm의 v22.23.1 사용**: 명령 앞에 `export PATH="$HOME/.nvm/versions/node/v22.23.1/bin:$PATH"` 붙이거나 `nvm use v22.23.1`.
 - **`.env`는 gitignore라 기기마다 새로 만든다**(이 기기엔 없어서 재생성함). 로컬 W2/W3용 값: `DATABASE_URL=postgresql://sunchak:sunchak@localhost:5432/sunchak?schema=public`, `REDIS_URL=redis://localhost:6379`, `JWT_SECRET`(로컬 임의값), `PORT=3001`. (docker-compose 계정과 일치.)
+- **⚠️ Google SSO는 이 기기의 Google Cloud Console에서 발급한 `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET`이 `.env`에 있어야 실제 로그인이 된다** — 미설정이어도 서버는 정상 기동하지만 `/auth/google` 시도 시 Google이 거부한다. **다른 기기에서 쓰려면**: 같은 Google Cloud 프로젝트의 OAuth 클라이언트에 그 기기의 콜백 URL(`http://localhost:3001/auth/google/callback`은 보통 기기 무관하게 동일)이 승인된 리디렉션 URI로 등록돼 있는지 확인 + Infisical에 값 동기화(ADR 0011, 아직 안 했으면 이 세션에서 수동으로 넣어야 함).
 - **인프라 기동**: `cd infra && docker compose up -d --wait postgres redis`.
 - **마이그레이션**: `migrate dev`는 대화형이라 비대화형(에이전트) 환경에서 막힌다. 우회(더 간단, 2026-08-01 확인) = `prisma migrate dev --name <이름> --create-only`(SQL만 생성, 적용 안 함) → `prisma migrate deploy` → `prisma generate`. (사람이 직접 터미널에서 하면 `migrate dev`가 정상.)
 - **seed 스크립트 실행**: `prisma db seed`가 내부적으로 `ts-node`를 PATH에서 찾는데, `./node_modules/.bin/prisma`처럼 바이너리를 직접 호출하면 PATH에 `node_modules/.bin`이 없어 `ENOENT` 에러가 난다. `export PATH="$(pwd)/node_modules/.bin:$PATH"`를 먼저 붙이거나 `pnpm exec prisma db seed` 사용.
 
 ## 🧪 테스트 실행법
-- `cd apps/api && pnpm exec jest`(전체 37개) 또는 `pnpm exec jest reservations`(held+SSE+sweep+reconcile 통합 16개) · `pnpm exec jest demo`(리셋+게이트 13개). 사전조건: 로컬 PG·Redis 기동.
+- `cd apps/api && pnpm exec jest`(전체 41개) 또는 `pnpm exec jest reservations`(held+SSE+sweep+reconcile 통합 16개) · `pnpm exec jest demo`(리셋+게이트 13개) · `pnpm exec jest auth`(회원가입/로그인/Google SSO 9개). 사전조건: 로컬 PG·Redis 기동.
 - ⚠️ 실DB를 쓰는 통합 스펙 파일이 여러 개(reservations/sweep/reconcile/demo)라 **`maxWorkers: 1`(package.json jest 설정)로 직렬 실행** — 병렬 실행 시 서로의 `beforeEach` 전체삭제가 충돌한다(2.5에서 발견).
 - ⚠️ **`pnpm exec`가 막히면**: bullmq의 선택적 네이티브 빌드(`msgpackr-extract`)가 스킵돼 pnpm의 실행 전 deps 점검이 실패할 수 있다. 우회 = 바이너리 직접 호출 `./node_modules/.bin/jest`, `./node_modules/.bin/tsc --noEmit`. (기능 무해 — JS로 폴백. 원하면 `pnpm approve-builds`로 승인.)
 - W2 벤치: 서버(`pnpm start:dev`)+로컬 PG 기동, admin 계정 존재 확인 후 `ADMIN_PASSWORD=... bash apps/api/test/load/bench.sh`.

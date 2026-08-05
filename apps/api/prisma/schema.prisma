@@ -47,7 +47,7 @@ enum PaymentStatus {
 model User {
   id        Int      @id @default(autoincrement())
   email     String   @unique // 로그인 식별자 → 유니크 인덱스 자동 생성
-  password  String // argon2 해시만 저장. 평문 금지.
+  password  String? // argon2 해시만 저장. 평문 금지. Google 계정은 비밀번호가 없어 null.
   role      Role     @default(USER)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

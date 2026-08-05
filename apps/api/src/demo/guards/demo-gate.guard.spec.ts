@@ -3,7 +3,7 @@ import { Reflector } from '@nestjs/core';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { DemoGateGuard } from './demo-gate.guard';
-import { Public } from '../decorators/public.decorator';
+import { Public } from '../../common/decorators/public.decorator';
 
 // 실제 HTTP/DB 없이 canActivate()의 판단 로직만 검증하는 순수 단위 테스트.
 // ExecutionContext는 가드가 실제로 쓰는 세 메서드(getHandler/getClass/
