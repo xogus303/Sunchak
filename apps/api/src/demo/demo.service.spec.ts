@@ -1,6 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { JwtModule, JwtService } from '@nestjs/jwt';
+import { getQueueToken } from '@nestjs/bullmq';
 import {
   BadRequestException,
   HttpException,
@@ -8,11 +9,13 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
+import { firstValueFrom } from 'rxjs';
 import { EventStatus, ReservationStatus } from '@prisma/client';
 import { DemoService } from './demo.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
 import { ReservationsService } from '../reservations/reservations.service';
+import { CONFIRM_QUEUE } from '../reservations/reservations.constants';
 
 const TEST_GATE_PASSWORD = 'sunchak-test';
 const SIM_COOLDOWN_KEY = 'demo:sim:cooldown';
@@ -35,6 +38,12 @@ describe('DemoService (통합 — 데모 리셋)', () => {
   // ReservationsService.create를 '호출하는지'만 확인하면 되므로 스텁으로 대체.
   const reservationsCreateMock = jest.fn().mockResolvedValue({});
 
+  // stats가 큐 적체를 조회할 때 부르는 두 메서드만 흉내낸다(실제 큐 불필요).
+  const confirmQueueMock = {
+    getWaitingCount: jest.fn().mockResolvedValue(0),
+    getActiveCount: jest.fn().mockResolvedValue(0),
+  };
+
   beforeAll(async () => {
     process.env.DEMO_GATE_PASSWORD = TEST_GATE_PASSWORD; // ConfigModule 로드 전에 세팅
     process.env.DEMO_SIM_MAX_VU = '10';
@@ -49,6 +58,7 @@ describe('DemoService (통합 — 데모 리셋)', () => {
         PrismaService,
         RedisService,
         { provide: ReservationsService, useValue: { create: reservationsCreateMock } },
+        { provide: getQueueToken(CONFIRM_QUEUE), useValue: confirmQueueMock },
       ],
     }).compile();
     await moduleRef.init();
@@ -71,6 +81,8 @@ describe('DemoService (통합 — 데모 리셋)', () => {
     await prisma.event.deleteMany();
     await prisma.user.deleteMany();
     reservationsCreateMock.mockClear();
+    confirmQueueMock.getWaitingCount.mockClear().mockResolvedValue(0);
+    confirmQueueMock.getActiveCount.mockClear().mockResolvedValue(0);
 
     const user = await prisma.user.create({
       data: { email: `demo-${randomUUID()}@test.local`, password: 'x' },
@@ -208,6 +220,51 @@ describe('DemoService (통합 — 데모 리셋)', () => {
       await expect(service.simulateLoad(1)).rejects.toBeInstanceOf(
         HttpException,
       );
+    });
+  });
+
+  describe('stats 대시보드 (축 B-2)', () => {
+    it('데모 이벤트가 없으면 404를 던진다', async () => {
+      await expect(service.streamStats()).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+    });
+
+    it('재고·HELD/CONFIRMED 합계·큐 적체를 스냅샷으로 흘려보낸다', async () => {
+      const event = await createDemoEvent(10);
+      eventId = event.id;
+      await redis.set(stockKey(), '4'); // 재고 잔량
+
+      await prisma.reservation.create({
+        data: {
+          userId,
+          eventId,
+          quantity: 3,
+          idempotencyKey: randomUUID(),
+          status: ReservationStatus.HELD,
+          heldUntil: new Date(Date.now() + 60_000),
+        },
+      });
+      await prisma.reservation.create({
+        data: {
+          userId,
+          eventId,
+          quantity: 2,
+          idempotencyKey: randomUUID(),
+          status: ReservationStatus.CONFIRMED,
+        },
+      });
+      confirmQueueMock.getWaitingCount.mockResolvedValue(1);
+      confirmQueueMock.getActiveCount.mockResolvedValue(1);
+
+      const msg = await firstValueFrom(await service.streamStats());
+
+      expect(msg.data).toEqual({
+        remainingQty: 4,
+        heldCount: 3,
+        confirmedCount: 2,
+        queueBacklog: 2, // waiting(1) + active(1)
+      });
     });
   });
 

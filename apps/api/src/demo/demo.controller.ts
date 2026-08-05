@@ -1,4 +1,13 @@
-import { Body, Controller, HttpCode, HttpStatus, Post } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  HttpCode,
+  HttpStatus,
+  MessageEvent,
+  Post,
+  Sse,
+} from '@nestjs/common';
+import { Observable } from 'rxjs';
 import { DemoService } from './demo.service';
 import { GateDto } from './dto/gate.dto';
 import { SimulateDto } from './dto/simulate.dto';
@@ -30,5 +39,13 @@ export class DemoController {
   @HttpCode(HttpStatus.ACCEPTED)
   simulate(@Body() dto: SimulateDto) {
     return this.demoService.simulateLoad(dto.virtualUserCount);
+  }
+
+  // 실시간 판매 대시보드(ADR 0016 축 B-2). 재고·HELD/CONFIRMED·큐 적체를
+  // 1초 주기로 스냅샷 push. 전역 게이트 가드로 보호 — 개인 데이터가 아니라
+  // JWT 로그인은 불필요(게이트만 통과하면 누구나 같은 화면을 본다).
+  @Sse('stats/stream')
+  statsStream(): Promise<Observable<MessageEvent>> {
+    return this.demoService.streamStats();
   }
 }

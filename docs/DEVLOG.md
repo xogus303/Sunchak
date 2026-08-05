@@ -342,3 +342,15 @@
 - **검증**: 유닛 테스트 4건 추가(`demo.service.spec.ts` — 상한 초과 400, 정상 요청 202+백그라운드 실제 투입, 쿨다운 중 429, 리셋 시 `sim-` 유저만 삭제·일반 유저는 보존). `ReservationsService`는 모킹(큐 인프라까지 테스트 모듈에 안 들여도 됨). **전체 41→45 그린.**
   - **실제 서버로 e2e 수동 검증**(모킹 없이): seed 후 `POST /demo/simulate {virtualUserCount:45}` → 72ms만에 202 응답 확인(블로킹 안 됨) → 3초 후 Redis `stock:event:254` 100→55, DB `reservations` 45건 전부 CONFIRMED(워커가 이미 처리), `sim-` User 45건 생성 확인. 즉시 재요청은 429(쿨다운) 확인. 301명 요청은 400(상한) 확인. `POST /demo/reset` 후 `sim-` User·예매 0건, Redis 재고 100 원복 확인.
 - **다음**: W4 실시간 stats 대시보드(축 B-2) — 2.4의 `@Sse`+`Subject` 배관을 재사용해 재고·HELD/CONFIRMED·큐 적체를 스트리밍. 지금 시뮬레이션은 결과를 curl로만 확인했지만, B-2가 붙으면 방문자가 이 과정을 실시간으로 지켜볼 수 있게 된다.
+
+## 2026-08-05 · W4 실시간 stats 대시보드 (ADR 0016 축 B-2)
+
+- **설계 결정 — 폴링 vs 이벤트 기반**: 2.4의 SSE는 이벤트 기반(워커가 확정하는 그 순간에만 `publish`)이었지만, stats는 소스가 3개(Redis 재고·DB의 HELD/CONFIRMED 합계·BullMQ 큐 적체)라 이벤트 기반으로 엮으려면 관문 DECRBY·HELD INSERT·sweep·reconcile·confirm 워커 등 **이미 완성된 W3 코드 여러 곳**에 손을 대야 해서 결합도가 커진다. 대신 **1초 주기 폴링 스냅샷**(그때그때 다시 조회해서 그대로 흘려보냄)으로 결정 — 기존 코드 무변경, 새 파일도 없이 `DemoService`에 메서드 2개 추가로 끝남. 시뮬레이션이 어차피 배치 단위(300ms 간격)로 진행돼 "놓치면 안 되는 찰나의 이벤트"가 없다는 점도 폴링이 무난한 이유.
+- **구현**: `DemoModule`에 `BullModule.registerQueue({ name: CONFIRM_QUEUE })` 추가(같은 이름으로 여러 모듈이 등록해도 큐가 중복 생성되지 않음 — `AppModule`의 `forRootAsync` 연결 설정을 공유) → `DemoService`가 `@InjectQueue(CONFIRM_QUEUE)`로 큐를 주입받아 `getWaitingCount()`/`getActiveCount()`로 **적체만 읽음**(job을 넣지 않음, `ReservationsService`의 몫과 분리 유지).
+  - `streamStats()`: 구독 시작 전 데모 이벤트 존재를 한 번만 확인(리셋은 같은 이벤트 행을 갱신할 뿐 id는 안 바뀌므로 매 틱마다 다시 찾을 필요 없음) → `timer(0, 1000)`(구독 즉시 1회 + 이후 1초마다)를 `switchMap`으로 `getStats()`에 연결.
+  - `getStats(eventId)`: Redis 재고 + Prisma `groupBy(status)`(HELD/CONFIRMED quantity 합, reconcile.processor와 같은 패턴) + 큐의 waiting/active 카운트를 `Promise.all`로 병렬 조회.
+  - `DemoController`에 `@Sse('stats/stream')` 추가(전역 게이트 가드로 이미 보호, JWT 불필요 — 개인 데이터가 아니라 게이트 통과자 전원이 같은 화면을 봄).
+- **테스트**: `demo.service.spec.ts`에 2건 추가(이벤트 없으면 404, HELD/CONFIRMED/큐 적체 스냅샷이 기댓값과 일치) — `getQueueToken(CONFIRM_QUEUE)`로 큐를 가벼운 목(mock)으로 대체(실제 워커·Redis 큐 인프라 불필요, `reservations.service.spec.ts`가 이미 그 책임을 검증 중). **전체 45→47 그린.**
+- **실서버 e2e 수동 검증**: 리셋 → `curl -N`으로 SSE 스트림을 열어두고 1초 뒤 60명 시뮬레이션 투입 → 실시간으로 `재고 100→40, HELD 5→0, CONFIRMED 0→55→60, 큐 적체 0→6→0`으로 움직이는 스냅샷을 그대로 확인. ADR이 그리던 "숫자가 실시간으로 움직이는 대시보드"가 실제로 동작함을 확인.
+- **발견(수정은 다음으로 미룸)**: `simulateLoad()`가 쿨다운을 먼저 잠그고 그다음에 데모 이벤트 존재를 확인해서, 이벤트가 없는 상태(seed 전)에서 호출하면 404를 받으면서도 쿨다운은 이미 소비돼버린다. 사소한 엣지케이스(정상 운영에선 이벤트가 항상 있음)라 지금은 기록만 해두고 보류.
+- **다음**: W4 프론트엔드(apps/web) — 게이트 화면 + Google 로그인 버튼 + 데모 컨트롤(시뮬 버튼)·stats 대시보드 화면. 이제 백엔드 조각(게이트·리셋·시뮬·stats)이 다 갖춰졌다.

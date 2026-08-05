@@ -5,21 +5,35 @@ import {
   HttpStatus,
   Injectable,
   Logger,
+  MessageEvent,
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
+import { InjectQueue } from '@nestjs/bullmq';
+import { Queue } from 'bullmq';
 import { randomUUID } from 'node:crypto';
-import { EventStatus } from '@prisma/client';
+import { Observable, timer } from 'rxjs';
+import { map, switchMap } from 'rxjs/operators';
+import { EventStatus, ReservationStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
 import { ReservationsService } from '../reservations/reservations.service';
+import { CONFIRM_QUEUE } from '../reservations/reservations.constants';
 
 // 게이트 토큰 payload — 로그인 JWT(JwtPayload: sub/email/role)와 모양이 달라
 // 서로 안 섞인다. type이 곧 "이 토큰의 용도" 표식.
 export interface DemoGatePayload {
   type: 'demo';
+}
+
+// stats 대시보드 한 스냅샷의 모양(ADR 0016 축 B-2).
+export interface DemoStats {
+  remainingQty: number; // 재고 잔량 — Redis 관문 카운터가 실시간 진실
+  heldCount: number; // HELD 상태 예매 수량 합
+  confirmedCount: number; // CONFIRMED 상태 예매 수량 합
+  queueBacklog: number; // confirm 큐에 아직 안 끝난 job 수(대기+처리중)
 }
 
 /**
@@ -45,12 +59,16 @@ export class DemoService {
   // 재실행 쿨다운 잠금 키(전역 스코프 — 게이트 통과자라면 누구든 공유).
   private readonly SIM_COOLDOWN_KEY = 'demo:sim:cooldown';
 
+  // stats 대시보드 폴링 주기(축 B-2, ADR 0016 2026-08-05 결정 — 폴링 기반 스냅샷).
+  private readonly STATS_POLL_INTERVAL_MS = 1000;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly redis: RedisService,
     private readonly jwt: JwtService,
     private readonly config: ConfigService,
     private readonly reservations: ReservationsService,
+    @InjectQueue(CONFIRM_QUEUE) private readonly confirmQueue: Queue,
   ) {}
 
   async enterGate(password: string): Promise<{ demoToken: string }> {
@@ -194,5 +212,53 @@ export class DemoService {
       }
       this.logger.error('가상 유저 예매 실패', e);
     }
+  }
+
+  /**
+   * 실시간 판매 대시보드(ADR 0016 축 B-2). W3 2.4의 @Sse+이벤트 버스와 달리
+   * 소스가 3개(Redis 재고·DB 상태별 합계·BullMQ 큐 적체)라 이벤트 기반으로
+   * 엮으면 기존 파이프라인 여러 곳을 건드려야 해서, 대신 짧은 주기로 "지금
+   * 상태"를 다시 조회해 흘리는 폴링 기반 스냅샷을 택했다(기존 코드 무변경).
+   *
+   * 데모 이벤트 존재 확인은 구독 시작 전 한 번만(이후 매 틱마다 이벤트를
+   * 다시 찾을 필요 없음 — 리셋은 같은 이벤트 행을 갱신할 뿐 id가 안 바뀐다).
+   */
+  async streamStats(): Promise<Observable<MessageEvent>> {
+    const event = await this.prisma.event.findFirst({ where: { isDemo: true } });
+    if (!event) {
+      throw new NotFoundException(
+        '데모 이벤트가 없습니다 — seed(prisma db seed)를 먼저 실행하세요.',
+      );
+    }
+    const eventId = event.id;
+
+    // timer(0, 주기): 구독 즉시 한 번 쏘고, 그 다음부터 주기마다 반복.
+    return timer(0, this.STATS_POLL_INTERVAL_MS).pipe(
+      switchMap(() => this.getStats(eventId)),
+      map((stats) => ({ data: stats }) as MessageEvent),
+    );
+  }
+
+  private async getStats(eventId: number): Promise<DemoStats> {
+    const [remaining, statusSums, waiting, active] = await Promise.all([
+      this.redis.get(`stock:event:${eventId}`),
+      this.prisma.reservation.groupBy({
+        by: ['status'],
+        where: { eventId },
+        _sum: { quantity: true },
+      }),
+      this.confirmQueue.getWaitingCount(),
+      this.confirmQueue.getActiveCount(),
+    ]);
+
+    const sumOf = (status: ReservationStatus) =>
+      statusSums.find((s) => s.status === status)?._sum.quantity ?? 0;
+
+    return {
+      remainingQty: Number(remaining ?? 0),
+      heldCount: sumOf(ReservationStatus.HELD),
+      confirmedCount: sumOf(ReservationStatus.CONFIRMED),
+      queueBacklog: waiting + active,
+    };
   }
 }
