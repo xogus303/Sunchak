@@ -1,7 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigModule, ConfigService } from '@nestjs/config';
-import { BullModule, getQueueToken } from '@nestjs/bullmq';
-import { Job, Queue } from 'bullmq';
+import { BullModule } from '@nestjs/bullmq';
+import { Job } from 'bullmq';
 import { randomUUID } from 'node:crypto';
 import { ReservationStatus } from '@prisma/client';
 import { ReconcileProcessor } from './reconcile.processor';
@@ -16,7 +16,6 @@ describe('ReconcileProcessor (통합 — Redis 재고 재구성)', () => {
   let processor: ReconcileProcessor;
   let prisma: PrismaService;
   let redis: RedisService;
-  let queue: Queue;
 
   let userId: number;
   let eventId: number;
@@ -46,15 +45,16 @@ describe('ReconcileProcessor (통합 — Redis 재고 재구성)', () => {
     processor = moduleRef.get(ReconcileProcessor);
     prisma = moduleRef.get(PrismaService);
     redis = moduleRef.get(RedisService);
-    queue = moduleRef.get<Queue>(getQueueToken(RECONCILE_QUEUE));
   });
 
   afterAll(async () => {
-    await queue.obliterate({ force: true });
+    // sweep.processor.spec.ts와 같은 이유로 obliterate()를 안 쓴다 — 같은 Redis에
+    // 개발 서버가 떠 있으면 그 서버의 반복 job 스케줄까지 지워버린다(2026-08-06 발견).
     await moduleRef.close();
   });
 
   beforeEach(async () => {
+    await prisma.payment.deleteMany(); // Payment→Reservation FK를 먼저 지워야 아래 delete가 성공한다(ADR 0018)
     await prisma.reservation.deleteMany();
     await prisma.inventory.deleteMany();
     await prisma.event.deleteMany();

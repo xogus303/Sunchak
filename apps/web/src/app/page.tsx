@@ -1,69 +1,64 @@
-import Image from "next/image";
+"use client";
+
+import { useCallback, useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
+import { apiFetch, apiUrl } from "@/lib/api";
+import { GateForm } from "./gate-form";
+
+// "dashboard" = 게이트+로그인 모두 통과. 예전엔 이 상태에서 곧바로 통계
+// 대시보드를 그렸지만, 이벤트 목록이 별도 페이지로 분리되며(2026-08-06) 이제는
+// /events로 넘어간다 — 목록 렌더링 코드를 두 곳에 두지 않기 위해 리다이렉트로 처리.
+type Status = "checking" | "gate" | "login" | "dashboard";
+
+// 전용 "게이트/로그인 상태" 엔드포인트가 없어서, 이미 있는 GET /auth/me를
+// 재활용한다. 이 라우트는 전역 게이트 가드 → JwtAuthGuard 순으로 걸리므로,
+// 401 응답의 message 문자열로 "어느 막에서 막혔는지"를 구분한다:
+// - 게이트 실패: DemoGateGuard가 한글 메시지("데모 게이트를 먼저 통과하세요" 등)
+// - 로그인 실패: passport-jwt 기본 메시지("Unauthorized")
+// ⚠️ 백엔드가 이 문자열을 바꾸면 이 판별도 같이 깨진다(약한 결합).
+async function checkStatus(): Promise<Status> {
+  const res = await apiFetch("/auth/me");
+  if (res.ok) return "dashboard";
+  const body = await res.json().catch(() => null);
+  const message: string = body?.message ?? "";
+  if (message.includes("게이트") || message.includes("토큰")) return "gate";
+  return "login";
+}
 
 export default function Home() {
+  const router = useRouter();
+  const [status, setStatus] = useState<Status>("checking");
+
+  const refreshStatus = useCallback(() => {
+    checkStatus().then(setStatus);
+  }, []);
+
+  useEffect(() => {
+    refreshStatus();
+  }, [refreshStatus]);
+
+  useEffect(() => {
+    if (status === "dashboard") router.replace("/events");
+  }, [status, router]);
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert h-5 w-[100px]"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the{" "}
-            <code className="rounded bg-black/[.06] px-1.5 py-0.5 font-mono text-[0.9em] dark:bg-white/[.08]">
-              page.tsx
-            </code>{" "}
-            file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert h-[14px] w-4"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={14}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
+    <div className="flex flex-1 flex-col items-center justify-center gap-8 bg-zinc-50 px-6 py-16 dark:bg-black">
+      <h1 className="text-2xl font-semibold text-zinc-950 dark:text-zinc-50">Sunchak 데모</h1>
+
+      {status === "checking" && <p className="text-sm text-zinc-500">확인 중...</p>}
+
+      {status === "gate" && <GateForm onSuccess={refreshStatus} />}
+
+      {status === "login" && (
+        <a
+          href={apiUrl("/auth/google")}
+          className="rounded-full bg-foreground px-5 py-2 text-sm font-medium text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc]"
+        >
+          Google로 로그인
+        </a>
+      )}
+
+      {status === "dashboard" && <p className="text-sm text-zinc-500">이동 중...</p>}
     </div>
   );
 }

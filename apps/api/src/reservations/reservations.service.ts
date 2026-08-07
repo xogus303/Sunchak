@@ -7,15 +7,12 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
-import { InjectQueue } from '@nestjs/bullmq';
-import { Queue } from 'bullmq';
 import { Observable, defer, from, merge } from 'rxjs';
 import { filter, map, take } from 'rxjs/operators';
 import { Prisma, ReservationStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
 import { ReservationEventsService } from './reservation-events.service';
-import { CONFIRM_QUEUE } from './reservations.constants';
 
 // W2 동시성 비교용 — 예매 재고 차감을 처리하는 5가지 전략.
 // + W3 최종 흐름(held): 관문(DECRBY) + HELD 선기록 + 멱등성 보상.
@@ -33,16 +30,15 @@ export class ReservationsService {
     private readonly prisma: PrismaService,
     private readonly redis: RedisService,
     private readonly events: ReservationEventsService,
-    @InjectQueue(CONFIRM_QUEUE) private readonly confirmQueue: Queue,
   ) {}
 
   // 낙관적 락 재시도 상한.
   private readonly MAX_RETRIES = 5;
 
-  // HELD 유효 시간(2.5 안전장치). 지금은 confirm job이 즉시 확정돼 거의 발동하지
-  // 않고, 주로 'HELD 고아'(create 커밋~queue.add 사이 크래시) 회수용 안전망이다.
-  // 실제 결제가 붙으면 체크아웃 소요시간 기준으로 재검토할 값.
-  private readonly HELD_TTL_MS = 5 * 60 * 1000;
+  // HELD 유효 시간 — 결제(ADR 0018) 창. 이 안에 결제하기를 눌러야 한다(2.5 안전장치가
+  // 지나면 sweep이 회수). PRD 원안은 5분이지만, 방문자가 만료를 체감하기엔 너무 길어
+  // 30초로 조정(2026-08-06) — sweep 주기(SWEEP_INTERVAL_MS)도 같이 좁혀야 한다.
+  private readonly HELD_TTL_MS = 30 * 1000;
 
   /**
    * 예매 진입점 — strategy에 따라 각 구현으로 분기한다.
@@ -209,7 +205,8 @@ export class ReservationsService {
 
   // ── 6) HELD 선기록 (W3 최종 흐름의 진입부) ──────────────────────
   // Redis 관문(DECRBY)으로 티켓을 확보한 즉시 DB에 status=HELD로 '선기록'한다.
-  // (다음 단계에서 큐 워커가 HELD→CONFIRMED로 확정하고 SSE로 알림 — 아직 미구현.)
+  // 확정(HELD→CONFIRMED)은 여기서 큐에 안 넣는다 — ADR 0018부터 결제 성공이
+  // 트리거다(PaymentsService.pay → PaymentProcessor가 confirm 큐에 투입).
   //
   // 멱등성: 클라이언트가 발급한 idempotencyKey로 재전송을 식별한다.
   //   - 관문이 INSERT보다 먼저라, 재전송도 DECRBY를 한 번 더 깎는다.
@@ -229,6 +226,9 @@ export class ReservationsService {
     const remaining = await this.redis.decrby(key, quantity);
     if (remaining < 0) {
       await this.redis.incrby(key, quantity); // 초과분 되돌리기
+      // 재고 소진으로 예매 자체가 막힌 시도 집계(결제 실패와는 다른 지표 —
+      // 결제 단계에 도달하지도 못했다). demo stats 대시보드가 이 값을 보여준다.
+      await this.redis.incr(`soldout:event:${eventId}`);
       throw new ConflictException('재고가 부족합니다.');
     }
 
@@ -244,11 +244,6 @@ export class ReservationsService {
         },
       });
 
-      // HELD가 DB에 커밋된 뒤 확정 job을 큐에 투입한다(워커가 이 id를 가리켜 CONFIRMED로).
-      // job엔 id만 — 나머지는 워커가 처리 시점에 DB에서 직접 읽는다.
-      // (알려진 틈: create 커밋과 add 사이 크래시 시 job 없는 HELD가 남는다.
-      //  DB·큐 이중 쓰기라 원자적이지 않음 → 2.5의 TTL 회수 잡이 안전망으로 정리한다.)
-      await this.confirmQueue.add('confirm', { reservationId: reservation.id });
       return reservation;
     } catch (e) {
       // 재전송(같은 userId+idempotencyKey의 2번째 INSERT) → DB가 원자적으로 거부.

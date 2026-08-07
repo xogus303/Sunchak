@@ -367,3 +367,124 @@
   - **새 env**: `WEB_APP_URL`(CORS origin + Google 리다이렉트 대상).
   - **검증**: `tsc`+전체 47개 테스트 그린(서비스 계층 테스트라 컨트롤러의 쿠키 로직은 영향 없음). **실서버 e2e로 쿠키만(헤더 없이) 통과 확인**: 게이트(`POST /demo/gate` → `Set-Cookie` 확인 → 쿠키만으로 `GET /demo/stats/stream` SSE 통과, 쿠키 없인 401), 로그인(`POST /auth/login` → `Set-Cookie` 확인 → 쿠키만으로 `GET /auth/me` 통과). `reservation-stream`은 같은 `JwtStrategy`를 타므로 별도 재검증 없이 동일 보장 적용됨.
 - **다음**: 실제 화면(게이트 진입 → Google 로그인 → 데모 컨트롤 + stats 대시보드) 구현. `fetch`/`EventSource` 호출엔 `credentials:'include'`/`withCredentials:true` 필요.
+
+## 2026-08-06 · W4 프론트 실제 화면 + "내 예매"(실제 티케팅) 기능
+
+- **구현**: 게이트 진입 폼(`gate-form.tsx`) → Google 로그인 버튼 → 데모 대시보드(`demo-dashboard.tsx`, 시뮬 컨트롤+stats 스탯 타일). `page.tsx`가 상태 하나(`checking/gate/login/dashboard`)로 세 화면을 조건 렌더링 — 전용 상태 확인 엔드포인트를 새로 안 만들고 기존 `GET /auth/me`의 401 메시지 문자열(게이트 실패 한글 메시지 vs JWT 실패 `"Unauthorized"`) 차이로 판별(백엔드 에러 문자열에 약하게 결합되는 트레이드오프를 인지하고 사용자 확인 후 채택).
+- **dataviz 스킬 참고**: stats 대시보드는 "헤드라인 숫자 몇 개"라 차트가 아니라 KPI row(스탯 타일)로 판단. 색은 텍스트에 안 쓰고 재고 소진(매진) 같은 실제 상태에만 status 팔레트(`#d03b3b`) + 라벨 병기.
+- **Vitest+RTL 도입**: `apps/web`에 테스트 프레임워크가 아예 없어서(CLAUDE.md §7 요구사항) 이 세션에서 처음 설치. `vitest.config.mts`(jsdom, `resolve.tsconfigPaths:true` — 별도 플러그인 없이 Vite 8 내장 옵션), `vitest.setup.ts`(jest-dom + `afterEach(cleanup)` — globals를 안 켰으므로 RTL 자동 cleanup이 안 붙어 직접 등록해야 함, 안 하면 테스트 간 DOM 잔존으로 "여러 개 찾힘" 에러). jsdom엔 `EventSource`가 없어 `src/test/fake-event-source.ts`(최소 흉내 클래스)로 대체.
+- **"내 예매" 기능 추가 — 진짜 티케팅 기능이 빠져 있었다는 걸 사용자가 직접 써보고 발견**: 데모 대시보드가 "관찰"(가상 유저 시뮬+통계)만 가능했고, 로그인한 방문자 본인이 실제로 예매하는 화면이 없었다 — ADR 0014/0015가 만든 실제 파이프라인(HELD→큐→확정→SSE)을 프론트가 한 번도 호출하지 않고 있었다. `booking-form.tsx` 신규: `GET /events`로 `isDemo` 이벤트 조회 → 수량 입력+예매하기 → `POST /events/:eventId/reservations?strategy=held` → 응답 `reservation.id`로 `GET /reservations/:id/stream`(SSE) 구독해 HELD→CONFIRMED 실시간 반영.
+- **실서버 e2e로 실제 확인**: 로그인 → 예매 → 확정까지 실제로 동작. **로컬은 관문→HELD→큐→확정이 너무 빨라(수백ms) "HELD" 문구가 화면에 거의 안 보이고 곧바로 확정으로 넘어감** — 버그 아니라 로컬 워커 지연이 거의 없어서 그런 것.
+- **git 위생 버그 발견·수정**: `apps/web/.gitignore`(create-next-app 기본 생성분)의 `.env*` 패턴이 `.env.example`까지 무시하고 있었다 — 이대로면 새로 만든 env 예시 파일이 영원히 git에 안 올라가 다른 기기에서 필요한 env를 알 방법이 없었을 것. 루트 `.gitignore`와 같은 좁은 패턴(`.env`/`.env.local`/`.env.*.local`)으로 교체.
+- **다음**: 배포. 단, 이 세션 후반에 "티케팅 기능 자체가 이거 다인가?" 질문으로 더 큰 gap이 드러남(아래 항목).
+
+## 2026-08-06 · 선착순 입장 대기열 (ADR 0017) — 원래 기획과의 gap 재확인에서 시작
+
+- **계기**: "이 프로젝트 원래 목적이 뭐였는지 먼저 체크하자"는 사용자 요청으로 PRD(`02_서비스_기획안.md`)·로드맵·ADR 0006/0014/0015를 다시 대조. **발견**: PRD 원안의 핵심 시나리오("대기열에서 실시간 순번을 보며 기다린다")가 ADR 0014/0015 구현 과정에서 "즉시 판정 관문"으로 조용히 대체됐다 — 더 나은 엔지니어링 선택(k6로 증명)이었지만 어떤 ADR도 이 대체를 명시적으로 남기지 않았다. 추가로 코드 확인 결과 모의결제(Payment 테이블은 스키마에 있으나 서비스 없음)·오픈시각 검사·이벤트 목록 화면·내 예매 내역도 PRD 대비 빠져 있음(전부 STATUS.md에 기록, 대기열만 이번에 착수).
+- **"즉시 판정 vs 대기열" 논의**: 사용자가 "대기열이 관문보다 얼마나 강력한지"를 물어 정정 — **둘은 경쟁 관계가 아니라 계층 관계**다. 대기열은 관문(hot row 직렬화 자체)의 처리량을 올리지 않는다, 오히려 의도적으로 입장 속도를 늦추는 장치다(다운스트림 보호+낭비 방지+재시도 폭탄 억제+봇 완화가 목적이지, "더 빠른 판정"이 목적이 아님). 이 프로젝트 실사용자는 소수(개발자+공유 대상)뿐이라 대기열의 진짜 존재 이유는 방어가 아니라 **원래 PRD 학습 포인트 완결 + 포트폴리오 서사 확장**임을 ADR에 솔직하게 명시.
+- **설계(ADR 0017)**: Redis Sorted Set `queue:event:{id}`(FIFO) + BullMQ repeatable job(`AdmissionProcessor`, 2초 주기로 20명씩 `ZPOPMIN`) + `admitted:event:{id}:{userId}` 키(TTL, sweep 잡 없이 Redis가 자연 만료 — 입장 허가는 아직 재고를 안 건드린 상태라 유실돼도 정합성 문제 없음). `QueueService.assertAdmitted()` 한 곳을 실사용자(컨트롤러)·가상 유저(데모 서비스) 둘 다 통과해야 함 — 특수 경로 없음.
+- **가상 유저 현실성**: 사용자 요청으로 "입장해도 랜덤하게 포기하거나 늦게 시도"를 추가(20% 포기 + 랜덤 지연). 이게 오히려 설계를 단순하게 만듦 — 가상 유저도 실사용자와 똑같이 허가창을 놓칠 수 있어 특수 케이스 없이 같은 코드 경로로 통합됨.
+- **삽질 — 파라미터 두 개의 비율을 안 맞춰서 생긴 버그 아닌 버그**: 입장 허가창을 "더 짧게"(30초→8초) 줄이면서, 가상 유저 랜덤 지연 범위(1~35초, 원래 30초 창 기준으로 잡았던 값)를 같이 안 줄여서 실서버로 30명 시뮬레이션했더니 확정이 5명뿐이었다(기대는 대부분 성공). 원인 분석: 지연 범위가 허가창보다 훨씬 넓어 "느려서 놓침" 비율이 원래 의도(일부만)가 아니라 압도적 다수가 돼버림(확률 계산상 성공률 ~16%). **교훈**: 두 시간 상수(허가창 vs 지연 범위)는 독립적으로 못 정한다 — 지연 범위는 반드시 허가창보다 "살짝만" 넓어야 "대부분 성공, 느린 일부만 놓침"이 된다. 지연을 500ms~10초로 좁혀 재검증 → 30명 중 22명 확정(~73%), 의도한 그림이 나옴. ADR·`.env.example` 수치도 실제 값으로 정정.
+- **테스트**: 신규 `queue.service.spec.ts`(8건)·`admission.processor.spec.ts`(4건)·`reservations.controller.spec.ts`(3건, 대기열 연동은 컨트롤러 레이어라 이 프로젝트 첫 컨트롤러 단위 테스트) + `demo.service.spec.ts`에 2건 추가(포기/허가창 만료). 지연·허가창 시간을 실제 값(수 초~수십 초)으로 기다리면 테스트가 느려져, `DEMO_SIM_ABANDON_PROBABILITY`/`DEMO_SIM_MIN·MAX_BOOKING_DELAY_MS`/`QUEUE_ADMISSION_WINDOW_MS`를 env로 빼 테스트에서만 아주 작은 값으로 덮어씀(기존 `DEMO_SIM_MAX_VU` 패턴과 동일). **전체 47→64 그린.**
+- **프론트**: `booking-form.tsx`를 확장해 "대기열 진입부터 예매 결과까지" 한 패널에서 문구만 바뀌는 상태 하나로 표현(`idle→queued→admitted→held→confirmed/expired/error`) — 화면을 안 갈아탐(사용자 요청). 신규 테스트 3건 추가. **`apps/web` 9→12 그린.**
+- **실서버 e2e**: 실제 로그인 사용자로 대기열 입장→순번 표시→(2초 뒤)입장 허가→예매→확정 전 흐름 확인. 가상 유저 30명으로 위 파라미터 버그도 실측으로 발견·재검증.
+- **다음**: 배포(Dockerize → CI/CD → VM+Nginx → Grafana 관측 → 최종 k6 리포트 → README/회고, `docs/STATUS.md` 참고).
+
+## 2026-08-06 · 모의 결제 (ADR 0018) — "대기열 다음은?"에서 시작
+
+- **계기**: 사용자가 대기열 순번 계산 방식을 확인하는 질문 끝에 "다음 작업은 모의결제로 갈게요"로 방향을 정함. PRD(§4-5, §6)를 다시 보니 "모의 결제 버튼, 비동기 pending→done"이 이미 명시돼 있었고, ADR 0015가 스스로 "결제 stub"이라 부르며 이 자리를 예고해뒀던 걸 재확인.
+- **설계**: `createHeld()`가 즉시 넣던 confirm job을 제거하고, "결제하기" 클릭이 새 `payment` 큐에 job을 넣게 함. `PaymentProcessor`가 80%/20% 확률로 성공/실패 판정 — 성공 시 **기존 `confirm` 큐에 job만 투입**(`ConfirmProcessor` 완전 재사용), 실패 시 Reservation→CANCELLED + Redis 재고 즉시 반환(사용자가 "즉시 반환 vs TTL 대기" 중 즉시 반환 선택).
+- **`Payment.idempotencyKey` 재검토**: STATUS 백로그에 "재검토 필요"로 남아있던 항목. 확인해보니 Reservation과 달리 실제 버그가 아니었음 — `Payment.reservationId`가 이미 `@unique`(1:1)라 결제 재시도 자체가 그걸로 원자적으로 막힘. 별도 복합 unique 불필요로 결론.
+- **⚠️ 삽질 — 이번 세션 최대 시간 소모**: 결제 구현 자체는 순조로웠는데, 테스트에서 SSE 관련 딱 1건("HELD 접수 직후 구독하면...")만 계속 5초 타임아웃. 처음엔 또 "백그라운드 서버가 큐를 나눠 먹나?" 의심 → `lsof -ti:3001 -sTCP:LISTEN | xargs kill`로 정리했는데도 **여전히 실패** — 여기서 한 단계 더 파고들어야 했다.
+  - **디버깅 과정**: 테스트에 직접 `console.log`를 심어 확인 → DB는 정확히 CONFIRMED로 바뀜(워커는 돌고 있음) → 그런데 `ReservationEventsService.ofReservation()`을 테스트에서 직접 구독해도 이벤트가 안 옴 → 즉 "누군가 job을 가져가 DB는 고치지만, 그 publish()는 다른 프로세스의 메모리 안에서만 터진다"는 뜻.
+  - **진짜 원인**: `ps aux`로 확인하니 이번 세션 동안 여러 번 띄운 `pnpm start:dev`의 **자식 프로세스(`nest.js start --watch`) 5개가 좀비로 남아있었다.** `pnpm start:dev`는 껍데기 래퍼일 뿐이고, 실제 서버(BullMQ 워커 포함)는 그 자식이다 — 포트를 점유한 프로세스(래퍼 또는 자식 중 하나)만 죽이면, **포트를 못 잡은 나머지 자식들은 포트 없이도 Redis에는 계속 연결된 채 살아남아** confirm 큐 job을 경쟁적으로 가져간다. `lsof -ti:포트`는 "포트를 점유한" 프로세스만 찾으므로 이 좀비들을 못 잡는다.
+  - **해결**: `ps aux | grep "nest.js start" | grep -v grep | awk '{print $2}' | xargs kill -9`로 자식까지 직접 찾아 죽임 → 그 즉시 테스트 전체 그린. **교훈**: 이 프로젝트에서 백그라운드로 `pnpm start:dev`를 띄웠다 지울 땐 포트가 아니라 프로세스 이름(`nest.js start`)으로 찾아야 한다 — 포트 기준 정리는 "겉보기 정리"일 뿐이었다.
+- **테스트**: 기존 `reservations.service.spec.ts`의 "HELD 접수 후 자동 확정" 전제 테스트들을 "confirm job을 직접 넣어(=결제 성공 흉내) 확인"으로 수정 + "결제 없이는 자동 확정 안 됨" 회귀 테스트 추가. 신규 `payments.service.spec.ts`(4)·`payment.processor.spec.ts`(3, 성공/실패/이중반환 방지). `Payment`가 `Reservation`에 FK를 걸게 되며 여러 스펙 파일의 `beforeEach`에 `payment.deleteMany()`를 `reservation.deleteMany()`보다 먼저 넣어야 했다(안 그러면 FK 제약 위반). **API 65→72 그린.**
+- **프론트**: `booking-form.tsx`의 `held` 단계에 "결제하기" 버튼 추가, `paying`(PENDING)·`cancelled`(실패+반환) 상태 신설. 예매 SSE 스트림이 CONFIRMED뿐 아니라 CANCELLED도 받아 분기하도록 수정(기존 "누가 confirm을 일으켰든 방송 하나만 듣는다" 설계 그대로 재사용). 신규 테스트 2건. **web 11→13 그린.**
+- **실서버 e2e**: 같은 브라우저 흐름을 5회 반복 → 4번 확정 / 1번 취소(80% 설계값과 근접) 둘 다 실제로 확인, 콘솔 에러 0.
+- **다음**: 배포 6단계 또는 남은 PRD 갭(오픈 시각 검사·이벤트 목록 화면·내 예매 내역·관리자 대시보드) 중 선택.
+
+## 2026-08-06 · PRD 갭 재검토 + 리셋 500 버그 발견·수정
+
+- **PRD 갭 재검토(사용자 주도)**: 남은 4개 갭을 하나씩 "이 데모에 실제로 필요한가"로 재검토.
+  - **오픈 시각 검사**: "오픈 전엔 대기열 자체가 안 서고, 오픈 시점에 한꺼번에 입장"까지 그려봤지만, 지금 시뮬 버튼이 이미 몰림을 보여주고 있어 **불필요로 결론**. 이 과정에서 나온 "대기열 순번을 랜덤화하면 어떨까" 제안도 검토했으나, 혼자 테스트할 때 가상 유저가 실사용자를 못 앞서게(=항상 0번) 만들면 "부여받은 순번만큼 기다린다"는 대기열의 학습 포인트 자체가 사라진다는 사용자의 반박이 맞아 **기각** — 지금처럼 도착 순서 그대로(FIFO, 실사용자·가상유저 동등)가 정답.
+  - **이벤트 목록/상세**: 데모뿐 아니라 실제 제품에도 필요하다고 판단 변경 — 여러 이벤트를 보여주되 의도적으로 하나만 판매중, 나머지는 마감 처리. 리셋 방식(전체 재생성 vs 열린 이벤트 하나만 재예매 가능하게)은 학습/UX에 영향 없다고 판단해 편리성 기준으로 선택 위임받음 → 다음 세션에서 "나머지는 정적 시드, 리셋은 지금처럼 열린 이벤트 하나만" 방향으로 결정 예정(기존 코드 재사용 극대화).
+  - **내 예매 내역**: 불필요로 최종 확정.
+  - **관리자 대시보드**: "판매 현황"이 기존 공개 stats 대시보드와 실질적으로 같다고 확인 → 별도 화면 없이 **기존 대시보드에 통합**, 결제 성공/실패(PAID/FAILED) 집계만 추가하기로 확정. 이벤트 등록 폼·admin 역할 분기는 불필요로 확정.
+- **⚠️ 발견 — 사용자가 브라우저로 직접 써보다 리셋 버튼이 500을 내는 걸 포착**: 원인 조사 결과 이번 세션에 추가한 `Payment→Reservation` FK(ADR 0018)가 `resetDemoEvent()`의 `reservation.deleteMany()`를 막고 있었다(`P2003`). 여러 테스트 스펙 파일의 `beforeEach` 정리 순서는 그날 바로 고쳤는데, **정작 실제로 리셋 버튼이 호출하는 프로덕션 메서드 자체는 놓쳤던 것** — 테스트가 전부 그린이어도 "그 로직을 실제로 호출하는 경로"가 빠지면 못 잡는다는 교훈. `payment.deleteMany({ where: { reservation: { eventId } } })`를 예매 삭제 앞에 추가해 해결, 회귀 테스트 1건 추가. **API 72→73 그린.** 실서버로 즉시 재검증(재고 100/100 정상 리셋 확인).
+- **다음**: 이벤트 목록/상세 화면 구현(정적 마감 이벤트 시드 + 목록 UI) + stats 대시보드에 결제 집계 타일 추가 → 그다음 배포.
+
+## 2026-08-06 · 이벤트 목록/상세 + 판매 현황 통합 (PRD 갭 마무리)
+
+- **구현**: `prisma/seed.ts`에 정적 마감(`SOLD_OUT`, `isDemo:false`) 이벤트 2개를 idempotent하게 추가 — 제목으로 존재 여부를 확인해 중복 생성 방지. `resetDemoEvent()`는 `isDemo:true` 하나만 대상이라 이 둘은 리셋에 전혀 영향받지 않는다(직전 대화에서 편리성 기준으로 확정한 설계 그대로).
+  - 신규 `event-list.tsx`: `GET /events` 전체를 카드로 나열, 상태(`ON_SALE`/`SOLD_OUT`/`UPCOMING`/`CLOSED`)를 한글 라벨+색으로 표시. 이벤트가 몇 개뿐이라 목록과 상세(제목/설명/가격/상태)를 한 화면에 합쳤다 — 별도 라우팅/페이지 없음.
+  - `DemoStats`에 `paidCount`/`failedCount` 추가(`Payment.groupBy`). "관리자 판매 현황"이 기존 공개 stats와 실질적으로 같다는 판단(직전 대화)에 따라 별도 화면 없이 기존 대시보드 그리드에 타일 2개만 추가(`grid-cols-3`, 6타일). 헤딩 "실시간 판매 현황" 추가.
+- **테스트**: `event-list.test.tsx`(1건, 판매중/매진 라벨 구분 확인). `demo.service.spec.ts`의 stats 스냅샷 테스트에 CANCELLED 예매 + Payment 2건(PAID/FAILED)을 추가해 새 집계 필드까지 검증하도록 갱신. `demo-dashboard.test.tsx`/`page.test.tsx`의 `/events` mock도 `description`/`price`/`status` 필드를 채워야 했다(EventList가 그 필드들을 쓰므로 — 안 채우면 `undefined.toLocaleString()`으로 렌더 자체가 깨짐).
+- **⚠️ 삽질 — 코드가 아니라 이 세션의 셸 환경 문제**: 프론트 테스트를 돌렸는데 관련 없는 파일까지 전부 `TypeError: React.act is not a function`으로 깨짐. 원인은 이 대화의 bash 환경에 `NODE_ENV=production`이 어디선가 새어들어와 있었던 것 — react-dom이 production 빌드(테스트용 `act` 없음)로 로드됨. `unset NODE_ENV`(또는 `NODE_ENV=test` 강제)로 즉시 해결, 코드는 무관했다. Jest(백엔드)는 자체적으로 `NODE_ENV=test`를 강제해서 영향 없었다.
+- **실서버 e2e**: 게이트→로그인 후 이벤트 목록(매진 2·오픈예정 1·판매중 1)과 통합 대시보드 6타일이 실제로 정상 렌더되는 것 스크린샷으로 확인. 콘솔 에러 0.
+- **결과**: `docs/STATUS.md`가 기록해온 PRD 갭 4개(오픈시각·이벤트목록·예매내역·관리자대시보드) + 모의결제까지 전부 처리 완료 — 남은 건 배포뿐.
+
+## 2026-08-06 · 실사용 중 발견한 버그 2건(테스트가 실서버를 파괴 / 가상 유저 결제 누락) + 리셋 버튼
+
+- **계기**: 사용자가 직접 브라우저로 데모를 돌리다 세 가지를 리포트 — "가상 유저 투입했는데 재고가 안 줄어요", "큐 적체도 그대로 0", "리셋은 버튼이 안 보이는데요?". 셋 다 실사용 중 발견이라 이론적 리뷰로는 못 잡았을 버그였다.
+- **원인 조사**: `docker exec sunchak-redis redis-cli`로 `queue:event:1079` Sorted Set을 보니 201명이 쌓여만 있고 전혀 빠지지 않고 있었다. `KEYS bull:admission:repeat:*`가 **아예 비어 있음** — admission 잡의 반복 스케줄러 자체가 등록 안 돼 있었다는 뜻.
+- **버그 A — 진짜 원인, 이번 세션에서 가장 심각한 발견**: `admission.processor.spec.ts`·`sweep.processor.spec.ts`·`reconcile.processor.spec.ts` 세 파일 모두 `afterAll`에서 `queue.obliterate({ force: true })`를 호출하고 있었다. 문제는 이 테스트들과 실행 중이던 `pnpm start:dev`가 **같은 Redis, 같은 큐 이름을 그냥 공유**한다는 것 — `obliterate`는 "그 큐에 관한 모든 것"(대기 job·완료 이력뿐 아니라 **반복 job 스케줄러 등록 자체**)을 지우는 API라, 이번 세션 동안 `jest`를 여러 번 돌릴 때마다 매번 **실서버가 등록해둔 admission 스케줄러가 통째로 사라졌다.** 겉보기엔 서버가 멀쩡히 살아 있고 다른 기능(예매·결제)은 정상이라 원인 특정에 시간이 걸렸다.
+  - **수정**: 3개 spec 파일에서 `obliterate()` 호출과, 그것 때문에만 필요했던 `queue`/`Queue`/`getQueueToken` import·변수를 전부 제거. `moduleRef.close()`(연결만 닫음)만으로 테스트 정리는 충분하다 — 반복 스케줄러는 "같은 큐 이름+같은 옵션으로 등록하는 모든 프로세스가 공유하는 멱등 자원"이라 테스트가 굳이 지울 이유가 없었다(지우면 오히려 그 이름을 쓰는 다른 프로세스까지 함께 망가짐).
+  - **복구**: API 서버를 재기동해 스케줄러를 재등록하니, 막혀 있던 201명이 몇 초 안에 정상적으로 20명씩 소진됐다.
+  - **교훈**: 여러 프로세스가 같은 이름으로 공유하는 Redis/큐 자원에 대해 테스트 정리 코드에서 "전체 삭제" 계열 API를 쓸 때는, 그 자원이 정말 그 테스트만의 소유인지 먼저 확인해야 한다.
+- **버그 B — 별개의 두 번째 원인**: 버그 A를 고쳐 admission이 다시 돌게 했는데도 `heldCount`만 늘고 `confirmedCount`가 0에 머물렀다. 원인은 ADR 0018(모의결제)에서 confirm 트리거를 "HELD 생성 시점"에서 "결제 성공 시점"으로 옮겼을 때, `DemoService.simulateBookingAttempt()`(가상 유저 시뮬레이션 코드)는 그대로 안 고쳐졌던 것 — 여전히 `reservations.create()`만 부르고 끝나서, 아무도 결제를 안 하니 confirm job이 영원히 안 들어가 HELD에 멈춰 있었다(5분 TTL 스윕 전까지).
+  - **수정**: `ReservationsModule`이 `PaymentsService`도 `exports`하도록 하고, `DemoService`에 주입 → `simulateBookingAttempt()`가 예매 성공 뒤 `payments.pay(reservation.id, userId, randomUUID())`를 호출하도록 수정(실사용자와 완전히 같은 결제 경로, 시뮬레이션 전용 분기 없음). `demo.service.spec.ts`의 관련 목·단언 갱신.
+  - **검증**: 실서버에서 가상 유저 30명 투입 → `remainingQty:89, confirmedCount:11, paidCount:11, failedCount:5`로 내부적으로 일관된 값 확인(100-11=89, PAID+FAILED=16이 결제 시도 전체와 일치).
+- **리셋 버튼**: 백엔드 `POST /demo/reset`은 ADR 0016 때부터 있었지만 그걸 누를 UI가 화면에 없었다(재고가 소진돼도 되돌릴 방법이 안 보임). `demo-dashboard.tsx`의 "실시간 판매 현황" 헤딩 옆에 "데이터 리셋" 버튼 추가(`useMutation`, 성공/실패 문구 표시). 신규 테스트 1건.
+- **검증**: API는 위험한 정리 로직만 제거한 것이라 테스트 수 변화 없이 73개 그린. web은 리셋 테스트 추가로 **14→15개 그린**(`tsc --noEmit`·`eslint` 클린). 실서버 curl로 게이트 통과 후 `POST /demo/reset` 호출 → 재고가 정확히 100/100으로 원복되는 것 확인.
+- **별개(사용자 자신의 터미널 문제)**: 사용자가 자기 터미널에서 `pnpm exec prisma studio` 실행 중 "pnpm requires Node v22.13+, 현재 v22.12.0" 에러를 만남 — 코드 문제가 아니라 시스템 기본 `node`가 낡은 버전이라 발생. 이 기기에는 이미 nvm으로 v22.23.1이 설치돼 있어(`docs/STATUS.md` "이 기기 로컬 환경" 참고) `export PATH="$HOME/.nvm/versions/node/v22.23.1/bin:$PATH"`를 명령 앞에 붙이거나 `nvm use v22.23.1`로 해결 가능.
+- **다음**: 배포 6단계(Dockerize → CI/CD → VM+Nginx → Grafana 관측 → 최종 k6 리포트 → README/회고) — PRD 갭·이번에 발견된 버그 모두 처리 완료.
+
+## 2026-08-06 · 리셋↔대기열 경합 수정 + "재고소진 실패" 지표 — 세 번째 실사용 시나리오
+
+- **계기**: 위 두 버그를 고친 뒤, 사용자가 이번엔 대기열까지 포함한 시나리오를 직접 재현: "대기열 순번 0 → 200명 투입 → 즉시 98개+2개 예매 → 멈춘 것처럼 보임(결제 실패도 안 늘어남) → 리셋 → 근데 리셋 후에도 재고가 또 깎임". 두 가지를 물었다 — ① 정말 멈춘 건가 계속 진행 중이었나, ② 리셋 시 대기열도 비워야 하지 않나.
+- **① 분석**: 안 멈췄다. 200명은 입장 허가(20명/2초)+랜덤 지연(0.5~10초)으로 처리에 최대 30초 걸리는 게 정상 설계다. 재고가 소진된 뒤 나머지 시도는 `demo.service.ts`의 `catch (ConflictException) { return; }`에서 조용히 삼켜진다(재고소진이 이 데모가 보여주려는 정상 종료 시나리오라 의도적으로 조용함) — 그래서 "멈춘 것처럼" 보였을 뿐. **"결제 실패가 안 늘어난 이유"도 발견**: `failedCount`(결제 실패)는 결제 단계까지 도달한 뒤 20% 확률로만 나오는 지표인데, 재고소진으로 막힌 시도는 결제 단계에 도달조차 못 해 아예 다른 지표다 — 지금까지 이 둘을 구분할 UI가 없어서 "결제 실패가 왜 안 늘지?" 혼란이 생겼다.
+- **② 확인 — 진짜 버그였다**: `resetDemoEvent()`가 재고·예매·유저는 리셋하면서 Redis 대기열(`queue:event:{id}` Sorted Set, ADR 0017)은 손 안 댔다. 그래서 리셋 전에 대기 중이던 사람들이 리셋 후에도 계속 입장 허가를 받아, 방금 원복한 재고를 또 깎았다.
+- **설계 옵션을 사용자에게 물어봄**: "대기열 ZSet만 비우기(간단, 대부분 해결)" vs "세대(generation) 기반 완전 무효화(완벽하지만 여러 파일에 개념 전파 필요)" — **사용자가 A(ZSet만 비우기)를 선택**. 부가로 "재고소진 실패"를 스탯에 노출할지도 물어 **노출하기로 확정**.
+- **구현**: `QueueService.purge(eventId)`(ZSet `DEL` + `queues:active`에서 `SREM`) 신규 → `resetDemoEvent()`가 재고 원복과 함께 호출. `reservations.service.ts`의 `createHeld()` 재고소진 분기(관문 DECRBY 음수)에 `soldout:event:{id}` Redis 카운터 추가(`INCR`) — `Payment.idempotencyKey` 논의 때처럼 W2 벤치마크 전략(naive~redis)은 안 건드리고 실제 파이프라인(held)에만 추가. `DemoStats.soldOutCount`로 노출, `demo-dashboard.tsx`에 "재고소진 실패" 타일 추가.
+- **실서버로 한계까지 실측**: 30명 투입 1초 후 즉시 리셋 → 대기열 ZSet은 그 순간 0으로 비워졌지만, **이미 입장 허가를 받아 `admitted:event:{id}:{userId}` TTL 키를 든 소수는 여전히 통과** — 리셋 후 수 초간 재고가 100→97로 더 깎였다. 이건 사전에 예상하고 사용자에게 공지한 대로다: 그 키는 대기열 ZSet에 없어 `purge()`가 못 건드리고, 입장 허가창(기본 8초) TTL이 지나야 자연히 막힌다. 예전 버그(200명 중 대다수가 새던 것) 대비 훨씬 좁은 창(최대 8초, 실측 3명 정도)으로 줄었고, 그 창이 지난 뒤(약 10~15초 후) 다시 리셋하면 완전히 깨끗하게 100으로 복구되는 것도 확인. **완전 차단(세대 기반 무효화)은 범위 초과로 보류** — 사용자가 A안의 이 트레이드오프를 인지하고 선택.
+- **테스트**: `queue.service.spec.ts`(+1, `purge`) · `demo.service.spec.ts`(+1, 리셋 시 대기열 비움 / stats 테스트에 `soldOutCount` 포함) · `reservations.service.spec.ts`(재고부족 테스트에 soldout 카운터 단언 추가). **API 73→75 그린.** 프론트 테스트 갱신(신규 타일 값 확인). **web 15개 유지.**
+- **부수 작업**: 사용자가 자기 터미널에서 `nvm: command not found`를 만나 원인을 확인 — `~/.nvm/nvm.sh`는 있었는데 `~/.zshrc`가 그걸 source하는 코드가 없었다. 사용자 동의 후 `~/.zshrc`의 `# NVM` 주석 아래에 `NVM_DIR` export + `nvm.sh` source 3줄을 추가해 실제 터미널에서 `nvm use v22.23.1`이 정상 동작하는 것까지 확인.
+- **다음**: 배포 6단계. PRD 갭·발견된 버그 3건 모두 처리 완료.
+
+## 2026-08-06 · 이벤트 목록 별도 페이지 분리 + 결제 TTL 30초 + `demo` 도메인 개념 정리
+
+- **`demo` 도메인 질문**: 사용자가 "`demo`가 테스트/프로덕션을 가르는 경계가 아니라 가상유저 플로우를 의미하는 거라면 무방하다"고 확인 요청. `app.module.ts`에 `DemoGateGuard`가 전역 가드로 박혀 있고 `DemoModule`이 배포 서버 자체에서 상시 동작하는 걸 근거로 확인 — 이 프로젝트는 "데모와 분리된 진짜 프로덕션"이 따로 없고 **배포된 사이트 자체가 데모**라, `demo`는 환경 분기가 아니라 "가상유저 시뮬레이션+게이트+stats+리셋" 기능 도메인의 이름이 맞다고 결론. 리네이밍은 안 함(비용 대비 이득 적음, 나중에 README에 이 정의만 한 줄 남기면 충분).
+- **결제 TTL 30초로 변경**: PRD 원안은 5분이지만 방문자가 만료를 체감하기엔 너무 길다는 판단(사용자 요청) — `reservations.service.ts`의 `HELD_TTL_MS`를 `5 * 60 * 1000` → `30 * 1000`으로 변경. **부수 조정**: sweep 주기(`SWEEP_INTERVAL_MS`)가 기존 30초 그대로면 "30초 후 반환"이 최악의 경우 최대 60초까지 늘어져 체감이 어긋난다 — TTL과 비슷하거나 넓은 sweep 주기는 원래 설계 의도("TTL보다 훨씬 촘촘")를 깨는 것이라 5초로 같이 좁혔다. 실서버로 HELD 생성 후 결제 없이 방치 → 정확히 heldUntil(30초 뒤) 근처에서 sweep이 회수해 DB는 EXPIRED, Redis 재고는 원복되는 것 확인(생성 01:31:22 → 회수 확인 01:31:56, TTL+sweep 텀 이내).
+- **이벤트 목록을 별도 페이지로 분리 + 판매중만 진입 가능**: 지금까지 `event-list.tsx`는 데모 대시보드 안에 인라인으로 박혀 있었고, 클릭해도 아무 동작이 없었다(어떤 이벤트를 클릭하든 `booking-form.tsx`는 항상 `isDemo` 이벤트로 예매를 진행 — 목록의 선택과 예매 대상이 서로 무관했음). 사용자 요청으로 실제 내비게이션을 만들었다:
+  - 신규 라우트 `app/events/page.tsx`(목록, `EventList` 렌더) + `app/events/[id]/page.tsx`(상세, `useParams()`로 id를 읽어 `GET /events/:id` 조회 후 `status==='ON_SALE'`일 때만 `BookingForm`을 렌더 — 아니면 "지금 판매중이 아닙니다" 안내).
+  - `event-list.tsx`: `ON_SALE` 카드만 `next/link`로 `/events/{id}`에 연결, 나머지는 그대로 클릭 불가 div.
+  - `booking-form.tsx`: 더 이상 `/events`를 스스로 조회해 `isDemo` 이벤트를 찾지 않는다 — 호출부(`[id]/page.tsx`)가 이미 확인한 `eventId`/`eventTitle`을 props로 받는다(불필요한 자체 탐색 제거, 진입 시점에 이미 검증된 이벤트라 다시 찾을 이유가 없음).
+  - `demo-dashboard.tsx`: 인라인 `EventList`/`BookingForm`을 제거하고 "이벤트 목록 보기 →" 링크로 대체 — 대시보드는 이제 순수하게 관측/운영 패널(stats·시뮬레이션·리셋)이고, 예매는 이벤트 상세 페이지에서만 일어난다.
+  - **회귀 발견·수정**: `/events/[id]`가 독립 라우트가 되며 로그인 전 상태(게이트만 통과)로도 도달 가능해졌다 — 예전엔 대시보드(로그인 후에만 렌더)를 통해서만 `BookingForm`에 닿을 수 있어서 문제가 안 됐지만, 지금은 로그인 안 된 방문자가 "대기열 입장"을 눌러도 서버가 401을 주는데 `handleJoinQueue`가 응답 성공 여부를 확인 안 해서 화면은 태연히 "대기 중입니다"를 보여주는 버그가 될 뻔했다. `res.ok` 체크를 추가해 실패 시 에러 문구+재시도 버튼을 보여주도록 고침.
+- **테스트**: `event-list.test.tsx`(+1, ON_SALE만 링크) · 신규 `events/[id]/page.test.tsx`(3, ON_SALE 진입/비ON_SALE 차단/404) · `booking-form.test.tsx`(props 방식으로 전면 수정 +1, 401 회귀 테스트) · `demo-dashboard.test.tsx`(EventList/BookingForm mock 제거, "이벤트 목록 보기" 링크 테스트로 교체) · `page.test.tsx`(대시보드 분기 mock 단순화). **web 15→21 그린.** 백엔드는 TTL 상수만 바꾼 것이라 테스트 수 불변, **API 75개 유지**(sweep/reconcile spec은 heldUntil을 직접 세팅해 상수값에 안 의존).
+- **다음**: 배포 6단계(Dockerize → CI/CD → VM+Nginx → Grafana 관측 → 최종 k6 리포트 → README/회고).
+
+## 2026-08-06 · 예매·판매현황 화면 재통합 + "포기(abandoned)" 지표 신설
+
+- **계기**: 직전 작업에서 이벤트 목록을 별도 페이지로 분리하며 예매(BookingForm)와 판매현황(DemoDashboard)도 함께 떼어놨는데, 사용자가 실제로 `/events/*`에 들어가보니 대기열 입장 UI만 보이고 판매현황·가상유저투입이 안 보여서 "제대로 테스트가 안 된다"고 지적. 같은 시점에 캡처와 함께 "200명 투입했는데 재고소진(121)+결제성공(10)이 200과 안 맞는다"는 두 번째 이슈도 제기.
+- **화면 재구성 방향**: 사용자 피드백의 핵심은 "내가 누른 예매 결과를 그 자리에서 지켜봐야 테스트가 의미 있다"는 것 — 예매와 관측(stats)을 분리한 게 오히려 테스트를 방해했다. `BookingForm`과 `DemoDashboard`를 다시 한 화면에 두되, 위치는 예전(루트 대시보드)이 아니라 **`/events/[id]`(이벤트 상세)**로 옮겼다 — 이벤트가 하나뿐인 데모라 stats도 사실상 이 이벤트 전용이라 자연스러운 배치. 루트 `/`는 게이트+로그인 통과 후 직접 화면을 그리지 않고 `useRouter().replace('/events')`로 넘긴다 — 목록 렌더링 코드가 root와 `/events` 두 곳에 중복되는 걸 피하기 위함(이벤트 목록 렌더링의 단일 소스는 `event-list.tsx` 하나).
+- **숫자 불일치 진단**: 사용자가 "200명인데 왜 재고소진+결제성공 합이 200이 아니냐"고 물어서 코드를 추적해보니 원인이 세 겹이었다.
+  1. **입장 허가를 받고도 확률적으로 포기하는 20%(`DEMO_SIM_ABANDON_PROBABILITY`)가 어떤 카운터에도 안 잡힌다** — `reservations.create()` 자체를 호출 안 하니 재고소진(soldOutCount)에도 안 걸리는, 완전히 투명한 버킷이었다.
+  2. **더 미묘한 두 번째 투명 버킷**: 가상 유저의 랜덤 사전지연(최대 10초, `DEMO_SIM_MAX_BOOKING_DELAY_MS`)이 입장 허가창(기본 8초, `QUEUE_ADMISSION_WINDOW_MS`)보다 길 수 있어, 그 사이 허가가 자연 만료되면 `assertAdmitted`가 `ForbiddenException`을 던지고 `simulateBookingAttempt`의 catch가 이걸 재고소진(`ConflictException`)과 같이 "조용히 넘어간다"고 뭉뚱그려 처리하는데, 코드 주석은 "포기(허가창 만료 포함)"라고 이미 이 둘을 같은 개념으로 취급하고 있었음에도 **집계는 안 하고 있었다** — 주석과 실제 동작이 어긋나 있던 셈.
+  3. 200명은 입장 허가(20명/2초)+랜덤 지연 처리에 최대 30초 걸리는데 캡처는 그 중간 시점이었고, 모든 카운터가 이번 라운드가 아니라 **리셋 이후 누적치**라 혼란을 더했다.
+- **수정**: `soldout:event:{id}`를 만들 때 세운 패턴 그대로 `abandoned:event:{id}` Redis 카운터를 신설. `simulateBookingAttempt()`의 확률적 포기 분기와, catch 블록의 `ForbiddenException`(허가창 만료) 분기 — 둘 다 여기 누적(`ConflictException`/재고소진은 이미 `createHeld()`에서 별도로 세고 있어 그대로 둠). `DemoStats.abandonedCount` 필드 추가, `resetDemoEvent()`가 0으로 리셋, 프론트 `demo-dashboard.tsx`에 "포기(미시도)" 타일 추가.
+- **실서버로 등식 검증**: 리셋 후 40명 투입 → 대기열(`queues:active`)이 빌 때까지 + 최대 지연(10초) 여유까지 기다린 뒤 최종 스냅샷 확인 → `paidCount(27)+failedCount(1)+soldOutCount(0)+abandonedCount(12) = 40`, 투입 인원수와 정확히 일치. 수정 전에는 같은 방식으로 재본 40명 라운드가 `16+9+0+9=34`로 6명이 비어 있었다(그 6명이 바로 위 2번 버킷, 허가창 만료).
+- **테스트**: `demo.service.spec.ts`의 기존 포기·허가창만료 테스트 2건에 `redis.get(abandonedKey())` 단언 추가, stats 스냅샷 테스트에 `abandonedCount` 포함(신규 `it` 없이 기존 보강이라 **API 75개 유지**). 프론트: `demo-dashboard.test.tsx`(SSE 스냅샷에 abandonedCount 포함) · `events/[id]/page.test.tsx`(DemoDashboard가 `useMutation`을 쓰므로 `QueryClientProvider`로 감싸는 `renderPage()` 헬퍼 추가, ON_SALE 케이스에서 "실시간 판매 현황"도 함께 뜨는지 확인) · `page.test.tsx`(`next/navigation`의 `useRouter`를 `vi.mock`으로 대체해 `/events`로 `replace` 호출되는지 검증 — 예전엔 대시보드 렌더 결과를 직접 봤지만 이제 리다이렉트만 하므로 방식을 바꿈). **web 21개 유지**(기존 테스트 보강 위주).
+- **부수 발견(회귀 아님, 확인만)**: `/events/[id]`가 로그인 전에도 도달 가능해진 채로 있어(직전 세션에서 `handleJoinQueue`의 401 미처리는 이미 고쳤음), 이번엔 `DemoDashboard`가 함께 렌더되며 `useMutation`이 `QueryClientProvider` 없이 쓰이면 크래시한다는 걸 테스트 작성 중 발견 — 실제 앱은 `RootLayout`이 이미 `Providers`로 감싸므로 문제없지만, 격리된 단위 테스트에서는 직접 감싸야 한다는 걸 놓쳤던 것(테스트 인프라 이슈, 프로덕션 코드는 무관).
+- **다음**: 배포 6단계. PRD 갭·발견된 버그 모두 처리 완료, 데모 스탯 정합성도 실측으로 검증됨.
+
+## 2026-08-06 · "입장 대기중" 지표 추가
+
+- **계기**: 사용자가 "대기열 진입 전 가상 유저 수도 집계할 수 있나요"라고 질문. 파이프라인을 다시 보니 두 가지 다른 해석이 가능했다 — ① "요청은 했지만 아직 대기열에 join도 안 된 수"(투입 배치가 20명/300ms로 나가는 진행률), ② "이미 대기열엔 들어갔지만 아직 입장 허가를 못 받은 수"(ADR 0017 Sorted Set의 크기). 구현 비용과 개념이 서로 꽤 다르므로 침묵하지 않고 두 옵션을 사용자에게 제시 → **②**로 확정.
+- **구현**: `QueueService`에 `size(eventId)`(`ZCARD queue:event:{id}`) 메서드 신규 추가 — `deactivateIfEmpty()`가 이미 같은 걸 내부적으로 하고 있어서 그 패턴을 그대로 공개 메서드로 뽑은 것. `DemoStats.admissionQueueCount`로 노출. 리셋 시 별도 처리 불필요 — `QueueService.purge()`가 이미 이 ZSet 자체를 지우므로 `size()`는 그냥 0을 반환하게 된다.
+- **네이밍 함정**: 기존 `queueBacklog` 필드가 이미 있어서 헷갈리기 쉬웠는데, 그건 BullMQ의 `confirm` 큐(결제 확정 job)이고 이번에 추가한 건 Redis Sorted Set 기반 입장 대기열로 **완전히 다른 큐**다. 주석과 필드명(`admissionQueueCount`)에 이 구분을 명시했다.
+- **구현 도중 사용자가 던진 별도 질문**: "재고 잔량이 있는데도 포기(미시도)가 뜨는 건 왜?" — 확인해보니 `abandonedCount`는 재고와 완전히 무관하게 두 경로로만 증가한다: ① 확률적 포기(기본 20%, `demo.service.ts:275`)는 예매 시도 자체를 안 하므로 재고 확인 단계에도 못 간다. ② 입장 허가창(8초)보다 랜덤 사전지연(최대 10초)이 길게 뽑히면 허가가 자연 만료돼 `ForbiddenException`으로 막히는데(`demo.service.ts:299`), 이것도 순전히 타이밍 문제라 재고와 무관하다. 재고가 넉넉해도 이 두 경로는 항상 일정 비율로 발생하는 게 정상 — 사용자에게 코드 위치와 함께 설명.
+- **실서버 검증**: 리셋 후 40명 투입 1초 후 스냅샷 → `admissionQueueCount:20, abandonedCount:4`. 정확히 첫 배치 20명만 허가 처리되고 나머지 20명이 대기 중이며, 허가받은 20명 중 4명(정확히 20%)이 벌써 포기 판정까지 끝난 상태 — 파이프라인의 각 단계가 실시간으로 눈에 보이는 것을 확인.
+- **테스트**: `queue.service.spec.ts`(+1, `size` — join 2명 후 1명 popNext로 빼서 나머지 1명만 남는지 확인). `demo.service.spec.ts`의 stats 스냅샷 테스트에 실제 `QueueService.join()`을 호출해 대기 인원을 만들고 `admissionQueueCount` 단언 추가(신규 `it` 없이 기존 보강, **API 75→76**은 `size` 테스트 1건 추가분). 프론트 `demo-dashboard.test.tsx`(SSE 스냅샷에 admissionQueueCount 포함 + "입장 대기중" 타일 텍스트 확인). **web 20개 유지**(기존 테스트 보강 위주).
+- **다음**: 배포 6단계. 데모 스탯이 이제 파이프라인 전 구간(대기열→HELD→결제→확정, 그리고 포기·재고소진 두 이탈 경로까지)을 실시간으로 빠짐없이 보여준다.

@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   HttpException,
   HttpStatus,
   Injectable,
@@ -14,13 +15,16 @@ import { JwtService } from '@nestjs/jwt';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { randomUUID } from 'node:crypto';
-import { Observable, timer } from 'rxjs';
+import { Observable, firstValueFrom, timer } from 'rxjs';
 import { map, switchMap } from 'rxjs/operators';
-import { EventStatus, ReservationStatus } from '@prisma/client';
+import { EventStatus, PaymentStatus, ReservationStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
 import { ReservationsService } from '../reservations/reservations.service';
+import { PaymentsService } from '../reservations/payments.service';
 import { CONFIRM_QUEUE } from '../reservations/reservations.constants';
+import { QueueService } from '../queue/queue.service';
+import { QueueEventsService } from '../queue/queue-events.service';
 
 // 게이트 토큰 payload — 로그인 JWT(JwtPayload: sub/email/role)와 모양이 달라
 // 서로 안 섞인다. type이 곧 "이 토큰의 용도" 표식.
@@ -29,11 +33,28 @@ export interface DemoGatePayload {
 }
 
 // stats 대시보드 한 스냅샷의 모양(ADR 0016 축 B-2).
+// paidCount/failedCount: 2026-08-06 PRD 재검토 — "관리자 판매 현황"이 이 공개
+// stats 대시보드와 실질적으로 같다고 확인해 별도 화면 없이 여기 통합, 모의 결제
+// (ADR 0018) 집계만 추가했다.
 export interface DemoStats {
   remainingQty: number; // 재고 잔량 — Redis 관문 카운터가 실시간 진실
   heldCount: number; // HELD 상태 예매 수량 합
   confirmedCount: number; // CONFIRMED 상태 예매 수량 합
   queueBacklog: number; // confirm 큐에 아직 안 끝난 job 수(대기+처리중)
+  // 입장 대기열(ADR 0017)에서 아직 허가를 못 받고 대기 중인 인원 수 — queueBacklog와
+  // 이름이 비슷하지만 완전히 다른 큐(BullMQ confirm 큐 vs Redis ZSet 입장 대기열)다.
+  // 200명처럼 큰 배치를 투입하면 전원이 허가받기까지 시간이 걸리는데, 그 "아직
+  // 대기 중"인 인원이 지금까진 전혀 안 보였다(2026-08-06 사용자 요청으로 추가).
+  admissionQueueCount: number;
+  paidCount: number; // 결제 성공(PAID) 건수
+  failedCount: number; // 결제 실패(FAILED) 건수
+  // 재고 소진으로 예매 자체가 막힌 시도 수(결제 단계 이전) — 결제 실패(failedCount)와
+  // 다른 지표라 구분해서 보여준다(2026-08-06 실사용 중 "결제 실패가 왜 안 늘지?" 혼란에서 추가).
+  soldOutCount: number;
+  // 입장 허가를 받고도 예매 시도 자체를 안 하고 나간 가상 유저 수(ADR 0017 현실성
+  // 요소) — 안 집계하면 "투입 인원수 = soldOut+paid+failed+held 합"이 안 맞아
+  // 헷갈린다(2026-08-06 실사용 중 발견).
+  abandonedCount: number;
 }
 
 /**
@@ -68,8 +89,29 @@ export class DemoService {
     private readonly jwt: JwtService,
     private readonly config: ConfigService,
     private readonly reservations: ReservationsService,
+    private readonly payments: PaymentsService,
+    private readonly queueService: QueueService,
+    private readonly queueEvents: QueueEventsService,
     @InjectQueue(CONFIRM_QUEUE) private readonly confirmQueue: Queue,
   ) {}
+
+  // 가상 유저의 현실성(ADR 0017) — 입장 허가를 받아도 사람처럼 포기하거나
+  // 늦게 시도할 수 있다. env로 뺀 이유는 순전히 테스트 속도(수 초~수십 초짜리
+  // 실제 지연을 기다리지 않고 테스트에서 아주 작은 값으로 덮어쓸 수 있어야 함) —
+  // 운영값 자체는 바뀔 일이 거의 없다.
+  private abandonProbability(): number {
+    return Number(this.config.get<string>('DEMO_SIM_ABANDON_PROBABILITY') ?? 0.2);
+  }
+  // 입장 허가창(QUEUE_ADMISSION_WINDOW_MS, 기본 8초)보다 살짝 넓게 잡아야 "대부분
+  // 성공, 느린 일부만 놓침"이 된다 — 창보다 훨씬 넓으면(예전 1~35초) 대부분이
+  // 허가창을 놓쳐 반대로 "대부분 실패"가 된다(실측: 8초 창+1~35초 지연 → 30명 중
+  // 5명만 성공. 근본 원인은 버그가 아니라 두 값의 비율 — 2026-08-06 e2e에서 발견).
+  private minBookingDelayMs(): number {
+    return Number(this.config.get<string>('DEMO_SIM_MIN_BOOKING_DELAY_MS') ?? 500);
+  }
+  private maxBookingDelayMs(): number {
+    return Number(this.config.get<string>('DEMO_SIM_MAX_BOOKING_DELAY_MS') ?? 10000);
+  }
 
   async enterGate(password: string): Promise<{ demoToken: string }> {
     const expected = this.config.get<string>('DEMO_GATE_PASSWORD');
@@ -92,6 +134,9 @@ export class DemoService {
       );
     }
 
+    // Payment→Reservation FK(ADR 0018) 때문에 예매보다 결제를 먼저 지워야 한다
+    // (안 그러면 P2003 위반 — 결제 기록이 하나라도 있으면 리셋이 그대로 500으로 죽었다).
+    await this.prisma.payment.deleteMany({ where: { reservation: { eventId: event.id } } });
     // 예매를 지워야 재고가 실제로 원복된다(HELD/CONFIRMED가 남아있으면 재구성
     // 잡(reconcile)이 다음 틱에 다시 깎아버림 — 순서가 아니라 삭제 자체가 핵심).
     await this.prisma.reservation.deleteMany({ where: { eventId: event.id } });
@@ -112,6 +157,14 @@ export class DemoService {
     });
 
     await this.redis.set(`stock:event:${event.id}`, inventory.remainingQty);
+    await this.redis.set(`soldout:event:${event.id}`, 0);
+    await this.redis.set(`abandoned:event:${event.id}`, 0);
+
+    // 대기열도 함께 비운다(ADR 0017 연동, 2026-08-06 실사용 중 발견) — 안 지우면
+    // 리셋 전에 대기열에 남아있던 사람들이 리셋 후에도 계속 입장 허가를 받아
+    // 방금 원복한 재고를 또 깎는다. 이미 허가를 받고 랜덤 지연 중인 사람은
+    // admitted 키의 짧은 TTL(기본 8초)이 지나면 자연히 막히므로 별도 처리 없음.
+    await this.queueService.purge(event.id);
 
     const updatedEvent = await this.prisma.event.update({
       where: { id: event.id },
@@ -188,9 +241,9 @@ export class DemoService {
     this.logger.log(`시뮬레이션 완료: 이벤트 ${eventId}, 가상 유저 ${count}명 투입`);
   }
 
-  // 가상 유저 한 명 = 실제 User 레코드 생성 + held 전략으로 예매 1건 시도.
-  // 재고 소진(ConflictException)은 이 데모가 보여주려는 정상 시나리오이므로
-  // 조용히 넘어간다 — 그 외 예외만 로그를 남긴다(개별 실패가 나머지 배치를 막지 않게).
+  // 가상 유저 한 명 = 실제 User 레코드 생성 + 대기열 진입. 실제 예매 시도는
+  // 대기열 입장 허가를 받은 뒤 별도로(fire-and-forget) 이어진다(ADR 0017) —
+  // 그래야 배치 발사 리듬(0016)이 입장 처리 리듬(ADR 0017)을 기다리지 않는다.
   private async injectVirtualUser(eventId: number) {
     try {
       const user = await this.prisma.user.create({
@@ -199,18 +252,66 @@ export class DemoService {
           password: null,
         },
       });
-      await this.reservations.create(
+      await this.queueService.join(eventId, user.id);
+      void this.simulateBookingAttempt(eventId, user.id).catch((e) => {
+        this.logger.error('가상 유저 예매 시도 중 오류', e);
+      });
+    } catch (e) {
+      this.logger.error('가상 유저 생성/대기열 진입 실패', e);
+    }
+  }
+
+  // 입장 허가를 기다렸다가, 실제 사람처럼 확률적으로 포기하거나 랜덤 지연 후
+  // 예매를 시도한다. 지연이 입장 허가창을 넘기면 실사용자와 똑같이
+  // assertAdmitted에서 막힌다 — 가상 유저를 위한 특수 경로는 없다.
+  // 포기(허가창 만료 포함)와 재고 소진은 이 데모가 보여주려는 정상 시나리오라
+  // 조용히 넘어간다 — 그 외 예외만 로그를 남긴다. 다만 "조용히"가 "집계 안 함"을
+  // 뜻하진 않는다 — 둘 다 abandoned/soldout 카운터로 남겨야 "투입 인원수 =
+  // paid+failed+soldOut+abandoned 합"이 실제로 맞는다(2026-08-06 실사용 중
+  // 사용자가 이 등식이 안 맞는 걸 직접 발견해 추가).
+  //
+  // ⚠️ 결제(ADR 0018)까지 이어서 호출한다 — 안 그러면 가상 유저는 전부 HELD에서
+  // 멈추고 CONFIRMED/CANCELLED로 못 넘어간다(2026-08-06 실사용 중 발견한 버그:
+  // 결제 단계 도입 당시 이 메서드를 안 고쳐서, HELD 이후 아무도 "결제"를 안 해
+  // PAID/FAILED 집계가 항상 0으로 보였다).
+  private async simulateBookingAttempt(eventId: number, userId: number) {
+    await firstValueFrom(this.queueEvents.ofUser(eventId, userId));
+
+    if (Math.random() < this.abandonProbability()) {
+      // 허가를 받고도 시도하지 않고 나감 — 예매를 아예 안 하니 재고소진 실패처럼
+      // 별도로 집계해두지 않으면 "투입 인원수와 스탯 합계가 안 맞는다"는 혼란이
+      // 생긴다(2026-08-06 실사용 중 발견).
+      await this.redis.incr(`abandoned:event:${eventId}`);
+      return;
+    }
+
+    const min = this.minBookingDelayMs();
+    const max = this.maxBookingDelayMs();
+    const delay = min + Math.random() * (max - min);
+    await new Promise((resolve) => setTimeout(resolve, delay));
+
+    try {
+      await this.queueService.assertAdmitted(eventId, userId);
+      const reservation = await this.reservations.create(
         eventId,
-        user.id,
+        userId,
         1,
         'held',
         randomUUID(),
       );
+      await this.payments.pay(reservation.id, userId, randomUUID());
     } catch (e) {
-      if (e instanceof ConflictException) {
+      if (e instanceof ForbiddenException) {
+        // 랜덤 지연(최대 10초)이 입장 허가창(기본 8초)보다 길 수 있어, 그 사이
+        // 허가가 자연 만료된 경우다 — 확률적 포기와 결과가 같으므로(둘 다
+        // "예매를 시도 못 하고 나감") 같은 카운터에 묶는다.
+        await this.redis.incr(`abandoned:event:${eventId}`);
         return;
       }
-      this.logger.error('가상 유저 예매 실패', e);
+      if (e instanceof ConflictException) {
+        return; // soldout 카운터는 이미 createHeld() 안에서 증가시켰다.
+      }
+      throw e;
     }
   }
 
@@ -240,25 +341,41 @@ export class DemoService {
   }
 
   private async getStats(eventId: number): Promise<DemoStats> {
-    const [remaining, statusSums, waiting, active] = await Promise.all([
-      this.redis.get(`stock:event:${eventId}`),
-      this.prisma.reservation.groupBy({
-        by: ['status'],
-        where: { eventId },
-        _sum: { quantity: true },
-      }),
-      this.confirmQueue.getWaitingCount(),
-      this.confirmQueue.getActiveCount(),
-    ]);
+    const [remaining, statusSums, waiting, active, paymentCounts, soldOut, abandoned, queued] =
+      await Promise.all([
+        this.redis.get(`stock:event:${eventId}`),
+        this.prisma.reservation.groupBy({
+          by: ['status'],
+          where: { eventId },
+          _sum: { quantity: true },
+        }),
+        this.confirmQueue.getWaitingCount(),
+        this.confirmQueue.getActiveCount(),
+        this.prisma.payment.groupBy({
+          by: ['status'],
+          where: { reservation: { eventId } },
+          _count: { _all: true },
+        }),
+        this.redis.get(`soldout:event:${eventId}`),
+        this.redis.get(`abandoned:event:${eventId}`),
+        this.queueService.size(eventId),
+      ]);
 
     const sumOf = (status: ReservationStatus) =>
       statusSums.find((s) => s.status === status)?._sum.quantity ?? 0;
+    const countOf = (status: PaymentStatus) =>
+      paymentCounts.find((p) => p.status === status)?._count._all ?? 0;
 
     return {
       remainingQty: Number(remaining ?? 0),
       heldCount: sumOf(ReservationStatus.HELD),
       confirmedCount: sumOf(ReservationStatus.CONFIRMED),
       queueBacklog: waiting + active,
+      paidCount: countOf(PaymentStatus.PAID),
+      failedCount: countOf(PaymentStatus.FAILED),
+      soldOutCount: Number(soldOut ?? 0),
+      abandonedCount: Number(abandoned ?? 0),
+      admissionQueueCount: queued,
     };
   }
 }

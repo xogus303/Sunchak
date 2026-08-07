@@ -25,6 +25,7 @@ describe('ReservationsService (통합 — held 흐름)', () => {
   let eventId: number;
 
   const stockKey = () => `stock:event:${eventId}`;
+  const soldOutKey = () => `soldout:event:${eventId}`;
   // 관문 재고 카운터를 Redis에 심는 헬퍼
   const seedStock = (qty: number) => redis.set(stockKey(), String(qty));
   const readStock = async () => Number(await redis.get(stockKey()));
@@ -92,6 +93,7 @@ describe('ReservationsService (통합 — held 흐름)', () => {
 
   // 각 테스트는 깨끗한 user·event·inventory(재고 5)에서 시작한다.
   beforeEach(async () => {
+    await prisma.payment.deleteMany(); // Payment→Reservation FK를 먼저 지워야 아래 delete가 성공한다(ADR 0018)
     await prisma.reservation.deleteMany();
     await prisma.inventory.deleteMany();
     await prisma.event.deleteMany();
@@ -114,7 +116,7 @@ describe('ReservationsService (통합 — held 흐름)', () => {
   });
 
   afterEach(async () => {
-    await redis.del(stockKey()); // 남은 재고 카운터 정리(테스트 간 격리)
+    await redis.del(stockKey(), soldOutKey()); // 남은 카운터 정리(테스트 간 격리)
   });
 
   describe('정상 예매', () => {
@@ -159,6 +161,8 @@ describe('ReservationsService (통합 — held 흐름)', () => {
 
       await expect(readStock()).resolves.toBe(0); // -1로 갔다가 보상으로 0 복구
       await expect(prisma.reservation.count()).resolves.toBe(0); // 예매 생성 안 됨
+      // 결제 실패와는 다른 지표(결제 단계에 도달도 못함) — demo stats가 이 값을 따로 보여준다.
+      await expect(redis.get(soldOutKey())).resolves.toBe('1');
     });
   });
 
@@ -173,17 +177,26 @@ describe('ReservationsService (통합 — held 흐름)', () => {
   });
 
   describe('확정(워커 HELD→CONFIRMED)', () => {
-    it('held 접수 후 워커가 예매를 CONFIRMED로 확정한다', async () => {
+    // ADR 0018 이후: HELD 생성이 confirm job을 더 이상 자동으로 넣지 않는다(결제
+    // 성공이 트리거 — PaymentProcessor의 몫, payment.processor.spec.ts 참고). 여기서는
+    // "결제 성공을 흉내"내어 큐에 직접 job을 넣어 ConfirmProcessor 자체의 동작만 검증한다.
+    it('held는 결제 없이 저절로 확정되지 않는다', async () => {
       await seedStock(5);
+      const reservation = await service.create(eventId, userId, 1, 'held', randomUUID());
 
-      const reservation = await service.create(
-        eventId,
-        userId,
-        1,
-        'held',
-        randomUUID(),
-      );
+      await new Promise((res) => setTimeout(res, 300)); // 자동으로 안 바뀌는지 확인할 여유
+
+      const r = await prisma.reservation.findUnique({ where: { id: reservation.id } });
+      expect(r?.status).toBe('HELD'); // 결제가 없었으니 그대로
+    });
+
+    it('confirm job이 들어오면(=결제 성공을 흉내) 워커가 HELD 예매를 CONFIRMED로 확정한다', async () => {
+      await seedStock(5);
+      const reservation = await service.create(eventId, userId, 1, 'held', randomUUID());
       expect(reservation.status).toBe('HELD'); // 접수 시점엔 아직 HELD
+
+      const queue = moduleRef.get<Queue>(getQueueToken(CONFIRM_QUEUE));
+      await queue.add('confirm', { reservationId: reservation.id });
 
       const confirmed = await waitForStatus(reservation.id, 'CONFIRMED');
       expect(confirmed.status).toBe('CONFIRMED');
@@ -192,18 +205,12 @@ describe('ReservationsService (통합 — held 흐름)', () => {
 
     it('이미 CONFIRMED인 예매에 확정 job이 또 들어와도 그대로 1건이다(워커 멱등)', async () => {
       await seedStock(5);
-
-      const reservation = await service.create(
-        eventId,
-        userId,
-        1,
-        'held',
-        randomUUID(),
-      );
+      const reservation = await service.create(eventId, userId, 1, 'held', randomUUID());
+      const queue = moduleRef.get<Queue>(getQueueToken(CONFIRM_QUEUE));
+      await queue.add('confirm', { reservationId: reservation.id });
       await waitForStatus(reservation.id, 'CONFIRMED');
 
       // 확정된 예매에 같은 job을 한 번 더 투입 → updateMany(WHERE status=HELD)가 0건(no-op).
-      const queue = moduleRef.get<Queue>(getQueueToken(CONFIRM_QUEUE));
       await queue.add('confirm', { reservationId: reservation.id });
       await new Promise((res) => setTimeout(res, 300)); // 처리 여유
 
@@ -232,13 +239,9 @@ describe('ReservationsService (통합 — held 흐름)', () => {
 
     it('구독 시점에 이미 CONFIRMED면 즉시 그 상태를 흘려보낸다(따라잡기)', async () => {
       await seedStock(5);
-      const reservation = await service.create(
-        eventId,
-        userId,
-        1,
-        'held',
-        randomUUID(),
-      );
+      const reservation = await service.create(eventId, userId, 1, 'held', randomUUID());
+      const queue = moduleRef.get<Queue>(getQueueToken(CONFIRM_QUEUE));
+      await queue.add('confirm', { reservationId: reservation.id }); // 결제 성공을 흉내(ADR 0018)
       await waitForStatus(reservation.id, 'CONFIRMED'); // 워커가 먼저 확정을 끝냄
 
       // 확정이 지나간 뒤 구독해도 current$(DB 조회)가 곧바로 CONFIRMED를 흘려야 한다.
@@ -252,14 +255,11 @@ describe('ReservationsService (통합 — held 흐름)', () => {
 
     it('HELD 접수 직후 구독하면 워커 확정이 스트림으로 흘러온다', async () => {
       await seedStock(5);
-      const reservation = await service.create(
-        eventId,
-        userId,
-        1,
-        'held',
-        randomUUID(),
-      );
+      const reservation = await service.create(eventId, userId, 1, 'held', randomUUID());
       expect(reservation.status).toBe('HELD'); // 구독 시작 시점엔 아직 HELD
+
+      const queue = moduleRef.get<Queue>(getQueueToken(CONFIRM_QUEUE));
+      await queue.add('confirm', { reservationId: reservation.id }); // 결제 성공을 흉내(ADR 0018)
 
       // 아직 HELD일 때 구독 → 워커가 확정하면 future$(방송)로 CONFIRMED가 흘러온다.
       const msg = await firstValueFrom(service.streamStatus(reservation.id));

@@ -55,3 +55,5 @@
 | [0014](./0014-reservation-strategy.md) | 선착순 예매 재고 차감: Redis 관문 + DB 비동기 기록 | Accepted |
 | [0015](./0015-reservation-consistency-design.md) | 예매 정합성 설계: HELD 선기록 + BullMQ 큐 + 멱등성 + SSE | Accepted |
 | [0016](./0016-public-demo-mode.md) | 공개 데모 모드: 진입 게이트 + 데모 장치 + 데이터 리셋 | Accepted |
+| [0017](./0017-admission-queue.md) | 선착순 입장 대기열: Redis Sorted Set 기반 admission 제어 | Accepted |
+| [0018](./0018-mock-payment.md) | 모의 결제: 확정 트리거를 HELD 생성에서 결제 성공으로 이동 | Accepted |

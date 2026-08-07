@@ -1,7 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigModule, ConfigService } from '@nestjs/config';
-import { BullModule, getQueueToken } from '@nestjs/bullmq';
-import { Job, Queue } from 'bullmq';
+import { BullModule } from '@nestjs/bullmq';
+import { Job } from 'bullmq';
 import { randomUUID } from 'node:crypto';
 import { ReservationStatus } from '@prisma/client';
 import { SweepProcessor } from './sweep.processor';
@@ -16,7 +16,6 @@ describe('SweepProcessor (통합 — TTL 만료 스윕)', () => {
   let processor: SweepProcessor;
   let prisma: PrismaService;
   let redis: RedisService;
-  let queue: Queue;
 
   let userId: number;
   let eventId: number;
@@ -47,16 +46,19 @@ describe('SweepProcessor (통합 — TTL 만료 스윕)', () => {
     processor = moduleRef.get(SweepProcessor);
     prisma = moduleRef.get(PrismaService);
     redis = moduleRef.get(RedisService);
-    queue = moduleRef.get<Queue>(getQueueToken(SWEEP_QUEUE));
   });
 
   afterAll(async () => {
-    // onModuleInit이 등록한 repeatable job까지 포함해 이 큐의 흔적을 지운다.
-    await queue.obliterate({ force: true });
+    // ⚠️ 예전엔 여기서 queue.obliterate({force:true})로 정리했는데, 같은 Redis에
+    // 개발 서버가 떠 있으면 그 서버가 등록한 반복 job 스케줄까지 통째로 지워버렸다
+    // (같은 큐 이름을 공유하므로 테스트 것과 서버 것이 사실상 같은 등록). 반복
+    // 스케줄이 남아있어도 무해하니(서버가 죽어있으면 아무도 안 쓰는 데이터일 뿐,
+    // 살아있으면 그 서버에 필요한 데이터) 그냥 연결만 닫는다.
     await moduleRef.close();
   });
 
   beforeEach(async () => {
+    await prisma.payment.deleteMany(); // Payment→Reservation FK를 먼저 지워야 아래 delete가 성공한다(ADR 0018)
     await prisma.reservation.deleteMany();
     await prisma.inventory.deleteMany();
     await prisma.event.deleteMany();
