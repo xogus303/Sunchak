@@ -49,7 +49,15 @@ export class QueueService {
 
   // NX(멤버가 없을 때만 추가) — 중복 클릭이 원래 진입 시각(순번)을 다시 지금으로
   // 밀어버리지 않게 한다.
+  //
+  // ⚠️ 재입장 시 이전 admitted 키를 지운다(2026-08-07 실사용 중 발견) — 안 지우면
+  // "허가받고도 아직 TTL(기본 8초)이 안 끝난 채로 대기열을 다시 join"하는 경우
+  // (예: 방문자가 이벤트 상세를 나갔다 재진입) 새로 받은 순번(rank)은 무시되고
+  // 예전 admitted=true가 그대로 응답에 실려, 방문자가 대기 없이 곧장 "허가됨"
+  // 화면으로 튀어버리는 버그가 있었다. join은 "지금부터 새로 기다리겠다"는
+  // 뜻이므로, 과거에 받은 허가는 여기서 확실히 무효화하는 게 맞다.
   async join(eventId: number, userId: number): Promise<void> {
+    await this.redis.del(this.admittedKey(eventId, userId));
     await this.redis.zadd(this.queueKey(eventId), 'NX', Date.now(), String(userId));
     await this.redis.sadd(ACTIVE_QUEUES_KEY, String(eventId));
   }

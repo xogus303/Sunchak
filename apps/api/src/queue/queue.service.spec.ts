@@ -81,6 +81,21 @@ describe('QueueService (통합 — 대기열 admission, ADR 0017)', () => {
     await expect(service.status(eventId, 2)).resolves.toEqual({ rank: 0, admitted: false });
   });
 
+  // 방문자가 이벤트 상세를 나갔다 재진입하면 프론트가 join을 다시 호출하는데,
+  // 이전 admitted 키(TTL 8초)가 아직 안 끝났으면 그대로 남아 "대기 없이 곧장
+  // 허가됨" 화면으로 튀어버리는 버그가 있었다(2026-08-07 실사용 중 발견).
+  it('허가 후 재입장(join)하면 이전 허가는 무효화되고 새 순번으로 다시 대기한다', async () => {
+    await service.join(eventId, 1);
+    await service.popNext(eventId, 1); // 실제 허가 흐름(AdmissionProcessor)처럼 큐에서 뺀 뒤 허가
+    await service.admit(eventId, 1);
+    await expect(service.status(eventId, 1)).resolves.toEqual({ rank: null, admitted: true });
+
+    await service.join(eventId, 2); // 다른 사람이 먼저 대기열에 서 있는 상태
+    await service.join(eventId, 1); // 1번이 재입장(예: 페이지 재진입)
+
+    await expect(service.status(eventId, 1)).resolves.toEqual({ rank: 1, admitted: false });
+  });
+
   it('deactivateIfEmpty는 대기열이 비었을 때만 활성 목록에서 제거한다', async () => {
     await service.join(eventId, 1);
     await service.popNext(eventId, 10); // 전원 꺼내 대기열을 비움
