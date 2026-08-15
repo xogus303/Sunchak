@@ -11,6 +11,7 @@ import { Role } from '@prisma/client';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
+import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { EventsService } from './events.service';
 import { CreateEventDto } from './dto/create-event.dto';
 
@@ -18,10 +19,13 @@ import { CreateEventDto } from './dto/create-event.dto';
 export class EventsController {
   constructor(private readonly eventsService: EventsService) {}
 
-  // 공개: 이벤트 목록
+  // 로그인 필요(2026-08-07, 유저별 격리) — "내 데모 이벤트"를 가려서 보여주려면
+  // 누구인지 알아야 한다. 실제 화면 흐름(page.tsx)은 게이트+로그인을 모두 통과한
+  // 뒤에만 이 목록에 도달하므로 실사용엔 영향이 없다.
+  @UseGuards(JwtAuthGuard)
   @Get()
-  findAll() {
-    return this.eventsService.findAll();
+  findAll(@CurrentUser() user: { id: number }) {
+    return this.eventsService.findAll(user.id);
   }
 
   // 공개: 이벤트 상세. ParseIntPipe가 :id 문자열을 number로 변환(아니면 400).

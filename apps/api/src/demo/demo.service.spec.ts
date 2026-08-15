@@ -22,9 +22,11 @@ import { QueueService } from '../queue/queue.service';
 import { QueueEventsService } from '../queue/queue-events.service';
 import { AdmissionProcessor } from '../queue/admission.processor';
 import { ADMISSION_QUEUE, ACTIVE_QUEUES_KEY } from '../queue/queue.constants';
+import { EventsService } from '../events/events.service';
 
 const TEST_GATE_PASSWORD = 'sunchak-test';
 const SIM_COOLDOWN_KEY = 'demo:sim:cooldown';
+const AUTO_SIM_COOLDOWN_KEY = 'demo:sim:auto-cooldown';
 
 // 리셋의 핵심(실제 삭제·재고 원복·Redis 동기화)은 실제 DB·Redis가 있어야
 // 의미 있게 검증된다.
@@ -88,6 +90,7 @@ describe('DemoService (통합 — 데모 리셋)', () => {
         QueueService,
         QueueEventsService,
         AdmissionProcessor,
+        EventsService, // 유저별 격리(2026-08-07) — DemoService가 "내 데모 이벤트"를 여기서 얻는다.
         { provide: ReservationsService, useValue: { create: reservationsCreateMock } },
         { provide: PaymentsService, useValue: { pay: paymentsPayMock } },
         { provide: getQueueToken(CONFIRM_QUEUE), useValue: confirmQueueMock },
@@ -130,14 +133,17 @@ describe('DemoService (통합 — 데모 리셋)', () => {
 
   afterEach(async () => {
     if (eventId) await redis.del(stockKey(), soldOutKey(), abandonedKey());
-    await redis.del(SIM_COOLDOWN_KEY); // 다음 테스트에 쿨다운 잠금이 새지 않게
+    await redis.del(SIM_COOLDOWN_KEY, AUTO_SIM_COOLDOWN_KEY); // 다음 테스트에 쿨다운 잠금이 새지 않게
     if (eventId) {
       await redis.del(`queue:event:${eventId}`);
       await redis.srem(ACTIVE_QUEUES_KEY, String(eventId));
     }
   });
 
-  const createDemoEvent = (totalQty: number) =>
+  // demoOwnerId를 지정해야 DemoService가 내부적으로 부르는
+  // findOrCreateOwnDemoEvent(userId)가 "이미 있다"고 보고 이 행을 그대로 쓴다
+  // (2026-08-07, 유저별 격리 — 안 지정하면 매번 새 이벤트를 만들어버린다).
+  const createDemoEvent = (totalQty: number, ownerId: number = userId) =>
     prisma.event.create({
       data: {
         title: '테스트 데모 이벤트',
@@ -145,15 +151,21 @@ describe('DemoService (통합 — 데모 리셋)', () => {
         openAt: new Date('2020-01-01T00:00:00.000Z'), // 과거 — 리셋이 갱신하는지 확인용
         status: EventStatus.SOLD_OUT, // 리셋이 ON_SALE로 되돌리는지 확인용
         isDemo: true,
+        demoOwnerId: ownerId,
         inventory: { create: { totalQty, remainingQty: 0 } },
       },
       include: { inventory: true },
     });
 
-  it('데모 이벤트가 없으면 404를 던진다', async () => {
-    await expect(service.resetDemoEvent()).rejects.toBeInstanceOf(
-      NotFoundException,
-    );
+  // 데모 이벤트가 아직 없어도 더 이상 404가 아니다 — 2026-08-07 유저별 격리
+  // 도입으로 findOrCreateOwnDemoEvent가 그 자리에서 "내 것"을 만들어준다.
+  it('데모 이벤트가 없으면 새로 만들어 리셋한다', async () => {
+    const result = await service.resetDemoEvent(userId);
+
+    expect(result.inventory.remainingQty).toBe(100); // 새로 만든 기본값
+    const created = await prisma.event.findUnique({ where: { demoOwnerId: userId } });
+    expect(created).not.toBeNull();
+    eventId = created!.id; // afterEach 정리 대상으로 등록
   });
 
   it('예매를 지우고 재고를 totalQty로, Redis도 같은 값으로 되돌린다', async () => {
@@ -171,7 +183,7 @@ describe('DemoService (통합 — 데모 리셋)', () => {
     });
     await redis.set(stockKey(), '7'); // 관문이 이미 3장 깎아둔 상태를 흉내
 
-    const result = await service.resetDemoEvent();
+    const result = await service.resetDemoEvent(userId);
 
     expect(result.inventory.remainingQty).toBe(10);
     await expect(prisma.reservation.count()).resolves.toBe(0);
@@ -203,7 +215,7 @@ describe('DemoService (통합 — 데모 리셋)', () => {
       },
     });
 
-    await expect(service.resetDemoEvent()).resolves.toBeDefined(); // 던지지 않아야 함(P2003 재발 방지)
+    await expect(service.resetDemoEvent(userId)).resolves.toBeDefined(); // 던지지 않아야 함(P2003 재발 방지)
 
     await expect(prisma.payment.count()).resolves.toBe(0);
     await expect(prisma.reservation.count()).resolves.toBe(0);
@@ -214,13 +226,13 @@ describe('DemoService (통합 — 데모 리셋)', () => {
     eventId = event.id;
 
     const before = Date.now();
-    const result = await service.resetDemoEvent();
+    const result = await service.resetDemoEvent(userId);
 
     expect(result.event.status).toBe(EventStatus.ON_SALE);
     expect(result.event.openAt.getTime()).toBeGreaterThanOrEqual(before);
   });
 
-  it('isDemo가 아닌 이벤트는 리셋 대상에서 제외한다', async () => {
+  it('isDemo가 아닌 이벤트는 리셋 대상에서 제외한다(내 이벤트만 새로 만들어 리셋)', async () => {
     const other = await prisma.event.create({
       data: {
         title: '수동 테스트용 이벤트(데모 아님)',
@@ -231,10 +243,10 @@ describe('DemoService (통합 — 데모 리셋)', () => {
       },
     });
 
-    await expect(service.resetDemoEvent()).rejects.toBeInstanceOf(
-      NotFoundException,
-    );
+    const result = await service.resetDemoEvent(userId);
+    eventId = result.event.id; // afterEach 정리 대상으로 등록
 
+    expect(result.event.id).not.toBe(other.id); // other가 아니라 내 전용 이벤트가 새로 생김
     const untouched = await prisma.inventory.findUniqueOrThrow({
       where: { eventId: other.id },
     });
@@ -244,11 +256,12 @@ describe('DemoService (통합 — 데모 리셋)', () => {
   it('시뮬레이션이 만든 sim- 접두사 유저는 지우고, 일반 유저는 남긴다', async () => {
     const event = await createDemoEvent(10);
     eventId = event.id;
+    // 이메일이 이벤트별로 스코프된다(2026-08-07, 유저별 격리) — sim-{eventId}-...
     await prisma.user.create({
-      data: { email: `sim-${randomUUID()}@sunchak.demo`, password: null },
+      data: { email: `sim-${eventId}-${randomUUID()}@sunchak.demo`, password: null },
     });
 
-    await service.resetDemoEvent();
+    await service.resetDemoEvent(userId);
 
     const remainingEmails = (await prisma.user.findMany()).map((u) => u.email);
     expect(remainingEmails.some((e) => e.startsWith('sim-'))).toBe(false);
@@ -264,7 +277,7 @@ describe('DemoService (통합 — 데모 리셋)', () => {
     const queueService = moduleRef.get(QueueService);
     await queueService.join(eventId, userId);
 
-    await service.resetDemoEvent();
+    await service.resetDemoEvent(userId);
 
     await expect(queueService.status(eventId, userId)).resolves.toEqual({
       rank: null,
@@ -275,7 +288,7 @@ describe('DemoService (통합 — 데모 리셋)', () => {
 
   describe('시뮬레이션 (축 B-1)', () => {
     it('가상 유저 수가 상한(DEMO_SIM_MAX_VU)을 넘으면 400을 던진다', async () => {
-      await expect(service.simulateLoad(11)).rejects.toBeInstanceOf(
+      await expect(service.simulateLoad(11, userId)).rejects.toBeInstanceOf(
         BadRequestException,
       );
       expect(reservationsCreateMock).not.toHaveBeenCalled();
@@ -285,7 +298,7 @@ describe('DemoService (통합 — 데모 리셋)', () => {
       const event = await createDemoEvent(10);
       eventId = event.id;
 
-      const result = await service.simulateLoad(1);
+      const result = await service.simulateLoad(1, userId);
       expect(result).toEqual({ accepted: 1 });
 
       await new Promise((res) => setTimeout(res, 100)); // 가상 유저 생성 + 대기열 join 여유
@@ -313,7 +326,7 @@ describe('DemoService (통합 — 데모 리셋)', () => {
       const event = await createDemoEvent(10);
       eventId = event.id;
 
-      await service.simulateLoad(1);
+      await service.simulateLoad(1, userId);
       await new Promise((res) => setTimeout(res, 100));
       await admissionProcessor.process({} as Job);
       await new Promise((res) => setTimeout(res, 100));
@@ -333,7 +346,7 @@ describe('DemoService (통합 — 데모 리셋)', () => {
       const event = await createDemoEvent(10);
       eventId = event.id;
 
-      await service.simulateLoad(1);
+      await service.simulateLoad(1, userId);
       await new Promise((res) => setTimeout(res, 100));
       await admissionProcessor.process({} as Job);
       await new Promise((res) => setTimeout(res, 150)); // 허가창 만료 + 지연 끝 여유
@@ -352,21 +365,79 @@ describe('DemoService (통합 — 데모 리셋)', () => {
       const event = await createDemoEvent(10);
       eventId = event.id;
 
-      await service.simulateLoad(1);
-      await expect(service.simulateLoad(1)).rejects.toBeInstanceOf(
+      await service.simulateLoad(1, userId);
+      await expect(service.simulateLoad(1, userId)).rejects.toBeInstanceOf(
         HttpException,
       );
+    });
+
+    // 이벤트 상세 페이지 마운트 시 자동 투입(2026-08-07)은 수동 버튼과 완전히
+    // 별개의 쿨다운을 써야 한다 — 안 그러면 방문자가 뒤로 가기→재입장을 반복할
+    // 때마다 대기열이 텅 비어 보이는 문제가 있었다(사용자가 직접 재현해 발견).
+    it('자동 투입(auto=true)은 수동 쿨다운과 별개의 쿨다운을 쓴다', async () => {
+      const event = await createDemoEvent(10);
+      eventId = event.id;
+
+      await service.simulateLoad(1, userId); // 수동 쿨다운 잠금
+      await expect(service.simulateLoad(1, userId, true)).resolves.toEqual({ accepted: 1 }); // auto는 안 막힘
+
+      await expect(service.simulateLoad(1, userId, true)).rejects.toBeInstanceOf(HttpException); // auto 쿨다운은 이제 잠김
+      await expect(service.simulateLoad(2, userId)).rejects.toBeInstanceOf(HttpException); // 수동 쿨다운은 여전히 잠긴 채
+    });
+
+    // 방문자 본인의 대기열 입장(단순 ZADD)이 가상 유저의 입장(User 생성 후
+    // ZADD, 더 느림)보다 항상 먼저 끝나 늘 0번을 받던 문제(2026-08-07 실사용
+    // 중 발견)의 회귀 테스트 — auto=true는 응답이 오는 시점에 이미 전원이
+    // 대기열에 서 있어야 한다(별도로 기다릴 필요 없이 즉시 확인 가능해야 함).
+    it('자동 투입(auto=true)은 응답 시점에 이미 전원이 대기열 입장을 마친 상태다', async () => {
+      const event = await createDemoEvent(10);
+      eventId = event.id;
+      const queueService = moduleRef.get(QueueService);
+
+      await service.simulateLoad(5, userId, true);
+
+      await expect(queueService.size(eventId)).resolves.toBe(5);
+    });
+
+    // 유저별 격리(2026-08-07)의 핵심 계약 — 한 유저의 쿨다운이 다른 유저의
+    // 시뮬레이션을 막으면 안 된다(안 그러면 두 사람이 동시에 테스트할 때
+    // 서로를 방해한다).
+    it('한 유저의 쿨다운은 다른 유저의 시뮬레이션을 막지 않는다', async () => {
+      const otherUser = await prisma.user.create({
+        data: { email: `other-${randomUUID()}@test.local`, password: 'x' },
+      });
+      const event = await createDemoEvent(10);
+      eventId = event.id;
+
+      await service.simulateLoad(1, userId); // 내 쿨다운만 잠금
+
+      await expect(service.simulateLoad(1, otherUser.id)).resolves.toEqual({
+        accepted: 1,
+      }); // 다른 유저는 안 막힘 — 이 호출이 otherUser 전용 데모 이벤트를 새로 만든다
+
+      const otherEvent = await prisma.event.findUniqueOrThrow({
+        where: { demoOwnerId: otherUser.id },
+      });
+      await redis.del(`queue:event:${otherEvent.id}`, `demo:sim:cooldown:${otherUser.id}`);
+      await redis.srem(ACTIVE_QUEUES_KEY, String(otherEvent.id));
     });
   });
 
   describe('stats 대시보드 (축 B-2)', () => {
-    it('데모 이벤트가 없으면 404를 던진다', async () => {
-      await expect(service.streamStats()).rejects.toBeInstanceOf(
-        NotFoundException,
-      );
+    it('데모 이벤트가 없으면 새로 만들어 빈 스냅샷을 흘려보낸다', async () => {
+      const msg = await firstValueFrom(await service.streamStats(userId));
+
+      // remainingQty:100 — 새로 만든 데모 이벤트의 전체 재고. 예매가 하나도
+      // 없으니 HELD/CONFIRMED는 0이지만, 재고 자체는 꽉 차 있어야 정상이다
+      // (2026-08-07: EventsService가 생성 시 stock:event Redis 키도 함께
+      // 심게 고치기 전에는 이 값이 버그로 0이 나왔었다).
+      expect(msg.data).toMatchObject({ remainingQty: 100, heldCount: 0, confirmedCount: 0 });
+      const created = await prisma.event.findUnique({ where: { demoOwnerId: userId } });
+      expect(created).not.toBeNull();
+      eventId = created!.id; // afterEach 정리 대상으로 등록
     });
 
-    it('재고·HELD/CONFIRMED 합계·큐 적체·결제 성공/실패·재고소진·포기 집계를 스냅샷으로 흘려보낸다', async () => {
+    it('재고·HELD/CONFIRMED 합계·큐 적체·결제 성공/실패·재고소진·포기·티켓 목록을 스냅샷으로 흘려보낸다', async () => {
       const event = await createDemoEvent(10);
       eventId = event.id;
       await redis.set(stockKey(), '4'); // 재고 잔량
@@ -378,7 +449,7 @@ describe('DemoService (통합 — 데모 리셋)', () => {
       await queueService.join(eventId, 9001);
       await queueService.join(eventId, 9002);
 
-      await prisma.reservation.create({
+      const held = await prisma.reservation.create({
         data: {
           userId,
           eventId,
@@ -426,9 +497,10 @@ describe('DemoService (통합 — 데모 리셋)', () => {
       confirmQueueMock.getWaitingCount.mockResolvedValue(1);
       confirmQueueMock.getActiveCount.mockResolvedValue(1);
 
-      const msg = await firstValueFrom(await service.streamStats());
+      const msg = await firstValueFrom(await service.streamStats(userId));
 
       expect(msg.data).toEqual({
+        totalQty: 10,
         remainingQty: 4,
         heldCount: 3,
         confirmedCount: 2,
@@ -438,6 +510,13 @@ describe('DemoService (통합 — 데모 리셋)', () => {
         soldOutCount: 5,
         abandonedCount: 2,
         admissionQueueCount: 2,
+        // 전부 userId로 만든 예매라 isMine:true — 이벤트가 유저별로 격리돼
+        // 다른 사람의 예매가 섞일 일이 없다(2026-08-07).
+        tickets: [
+          { id: held.id, quantity: 3, status: 'HELD', paymentStatus: null, isMine: true },
+          { id: confirmed.id, quantity: 2, status: 'CONFIRMED', paymentStatus: 'PAID', isMine: true },
+          { id: cancelled.id, quantity: 1, status: 'CANCELLED', paymentStatus: 'FAILED', isMine: true },
+        ],
       });
     });
   });

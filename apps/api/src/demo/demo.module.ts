@@ -3,6 +3,7 @@ import { BullModule } from '@nestjs/bullmq';
 import { AuthModule } from '../auth/auth.module';
 import { ReservationsModule } from '../reservations/reservations.module';
 import { QueueModule } from '../queue/queue.module';
+import { EventsModule } from '../events/events.module';
 import { CONFIRM_QUEUE } from '../reservations/reservations.constants';
 import { DemoService } from './demo.service';
 import { DemoController } from './demo.controller';
@@ -14,6 +15,8 @@ import { DemoController } from './demo.controller';
   // 실제 파이프라인(관문→HELD→큐→확정)에 흘려보낸다(축 B-1).
   // QueueModule: 가상 유저도 실사용자와 같은 대기열을 거치게 한다(ADR 0017) —
   // QueueService(join·assertAdmitted)와 QueueEventsService(입장 허가 방송 구독).
+  // EventsModule: findOrCreateOwnDemoEvent()로 "이 유저의 데모 이벤트"를 얻는다
+  // (2026-08-07, 유저별 격리 — 예전엔 isDemo:true 하나를 모두가 공유했다).
   // BullModule.registerQueue: AppModule의 forRootAsync(연결 설정)를 공유하며
   // 'confirm' 큐를 이 모듈에서도 주입 가능하게 한다(축 B-2 — 큐 적체 조회용,
   // job을 넣는 게 아니라 getWaitingCount() 등으로 읽기만 한다).
@@ -21,6 +24,7 @@ import { DemoController } from './demo.controller';
     AuthModule,
     ReservationsModule,
     QueueModule,
+    EventsModule,
     BullModule.registerQueue({ name: CONFIRM_QUEUE }),
   ],
   controllers: [DemoController],

@@ -1,4 +1,4 @@
-import { IsInt, Min } from 'class-validator';
+import { IsBoolean, IsInt, IsOptional, Min } from 'class-validator';
 
 export class SimulateDto {
   // 최소값만 여기서 검증한다. 상한(DEMO_SIM_MAX_VU)은 배포 시 env로 바뀌는
@@ -6,4 +6,10 @@ export class SimulateDto {
   @IsInt()
   @Min(1)
   virtualUserCount: number;
+
+  // 이벤트 상세 페이지 마운트 시 자동 투입인지 구분(2026-08-07) — 수동 "가상
+  // 유저 투입" 버튼과 별개의 훨씬 짧은 쿨다운을 적용하기 위함(demo.service.ts 참고).
+  @IsOptional()
+  @IsBoolean()
+  auto?: boolean;
 }

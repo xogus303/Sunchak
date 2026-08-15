@@ -25,6 +25,7 @@ import { PaymentsService } from '../reservations/payments.service';
 import { CONFIRM_QUEUE } from '../reservations/reservations.constants';
 import { QueueService } from '../queue/queue.service';
 import { QueueEventsService } from '../queue/queue-events.service';
+import { EventsService } from '../events/events.service';
 
 // 게이트 토큰 payload — 로그인 JWT(JwtPayload: sub/email/role)와 모양이 달라
 // 서로 안 섞인다. type이 곧 "이 토큰의 용도" 표식.
@@ -37,6 +38,10 @@ export interface DemoGatePayload {
 // stats 대시보드와 실질적으로 같다고 확인해 별도 화면 없이 여기 통합, 모의 결제
 // (ADR 0018) 집계만 추가했다.
 export interface DemoStats {
+  // 게이지 시각화(2026-08-08)가 "재고 잔량 / 총량" 비율을 그리려면 분모(총량)가
+  // 필요한데, DB의 진짜 값(inventory.totalQty)은 리셋해도 안 바뀌므로 매 틱
+  // Redis에서 다시 읽을 필요 없이 streamStats() 시작 시 한 번만 조회해 흘려보낸다.
+  totalQty: number;
   remainingQty: number; // 재고 잔량 — Redis 관문 카운터가 실시간 진실
   heldCount: number; // HELD 상태 예매 수량 합
   confirmedCount: number; // CONFIRMED 상태 예매 수량 합
@@ -55,12 +60,28 @@ export interface DemoStats {
   // 요소) — 안 집계하면 "투입 인원수 = soldOut+paid+failed+held 합"이 안 맞아
   // 헷갈린다(2026-08-06 실사용 중 발견).
   abandonedCount: number;
+  // 개별 예매를 티켓처럼 나열하기 위한 목록(2026-08-07) — 집계 숫자만으로는
+  // "내가 방금 누른 버튼이 만든 결과"가 안 보인다는 피드백으로 추가.
+  tickets: TicketSummary[];
+}
+
+// 티켓 카드/그리드 하나에 대응하는 최소 정보. isMine=true면 지금 보고 있는
+// 방문자 본인의 실제 예매, false면 이 방문자가 투입한 가상 유저의 예매다
+// (이벤트가 유저별로 격리돼 있어 다른 방문자의 예매는 애초에 안 섞인다).
+export interface TicketSummary {
+  id: number;
+  quantity: number;
+  status: ReservationStatus;
+  paymentStatus: PaymentStatus | null;
+  isMine: boolean;
 }
 
 /**
  * 공개 데모 모드(ADR 0016)의 데이터 리셋 + 진입 게이트.
- * - 리셋: seed와 수동 리셋 엔드포인트가 이 로직을 공유한다. 대상은
- *   `isDemo=true`인 단 하나의 이벤트뿐이다(로컬의 다른 이벤트와 안 섞이게).
+ * - 리셋: seed와 수동 리셋 엔드포인트가 이 로직을 공유한다. 대상은 "이 유저가
+ *   소유한" 데모 이벤트 하나뿐이다(2026-08-07, 유저별 격리 — ADR 0017 개정).
+ *   예전엔 isDemo:true인 이벤트를 모든 방문자가 공유해서, 한 사람이 리셋하면
+ *   동시에 테스트 중인 다른 사람 데이터까지 지워지는 문제가 있었다.
  * - 게이트: 공유 비번을 검증하고 단기 데모 토큰을 발급한다. 로그인과 완전히
  *   별개의 막이다(ADR: "게이트 ≠ 로그인").
  */
@@ -68,20 +89,41 @@ export interface DemoStats {
 export class DemoService {
   private readonly logger = new Logger(DemoService.name);
 
-  // 시뮬레이션이 만드는 가상 유저 이메일의 식별 접두사. §C 리셋이 이 패턴으로
-  // 골라 지운다(스키마 변경 없이 isDemo 식별 취지를 재사용, ADR 0016 2026-08-05 개정).
-  private readonly SIM_USER_EMAIL_PREFIX = 'sim-';
-
   // 투입 리듬(ADR 0016 2026-08-05 개정) — 묶음 발사. 묶음 안은 진짜 동시 요청이라
   // 경합이 재현되고, 묶음 사이 간격 덕분에 사람이 대시보드 숫자 변화를 따라갈 수 있다.
   private readonly SIM_BATCH_SIZE = 20;
   private readonly SIM_BATCH_INTERVAL_MS = 300;
 
-  // 재실행 쿨다운 잠금 키(전역 스코프 — 게이트 통과자라면 누구든 공유).
-  private readonly SIM_COOLDOWN_KEY = 'demo:sim:cooldown';
+  // auto=true(마운트 자동 투입) 전용 상한 — 이 인원수까지는 방문자 입장 전에
+  // 무조건 대기열 입장을 동기로 마친다(2026-08-07). SIM_BATCH_SIZE(대시보드
+  // 관찰용 발사 리듬)와는 목적이 달라 별도 상수로 둔다 — 프론트의 자동 투입
+  // 규모(5~100명)가 전부 이 안에 들어오므로, 사실상 매번 크라우드 전원이
+  // 방문자보다 먼저 대기열에 서게 된다.
+  private readonly AUTO_JOIN_GUARANTEE_MAX = 100;
 
   // stats 대시보드 폴링 주기(축 B-2, ADR 0016 2026-08-05 결정 — 폴링 기반 스냅샷).
   private readonly STATS_POLL_INTERVAL_MS = 1000;
+
+  // 재실행 쿨다운 잠금 키 — 유저별로 분리한다(2026-08-07, 유저별 격리) — 안
+  // 그러면 한 사람의 쿨다운이 다른 사람의 시뮬레이션까지 막아버린다.
+  private simCooldownKey(userId: number): string {
+    return `demo:sim:cooldown:${userId}`;
+  }
+  // 이벤트 상세 페이지 마운트 시 자동 투입(booking-form.tsx, 2026-08-07)은 수동
+  // "가상 유저 투입" 버튼과 별개의 훨씬 짧은 쿨다운을 쓴다 — 같은 키를 쓰면 방문자가
+  // 뒤로 가기→재입장을 반복할 때마다 새 크라우드가 안 들어가 매번 대기열이 텅
+  // 비어 보이는 문제가 있었다(사용자가 직접 재현해 발견). 수동 버튼은 최대
+  // 300명까지 청할 수 있어 오남용 방지가 더 중요하므로 30초를 그대로 유지한다.
+  private autoSimCooldownKey(userId: number): string {
+    return `demo:sim:auto-cooldown:${userId}`;
+  }
+
+  // 시뮬레이션이 만드는 가상 유저 이메일의 식별 접두사 — 이벤트별로 스코프한다
+  // (2026-08-07, 유저별 격리). 안 그러면 유저 A의 리셋이 `sim-` 접두사만 보고
+  // 유저 B가 방금 투입한 가상 유저까지 지워버린다.
+  private simUserEmailPrefix(eventId: number): string {
+    return `sim-${eventId}-`;
+  }
 
   constructor(
     private readonly prisma: PrismaService,
@@ -92,6 +134,7 @@ export class DemoService {
     private readonly payments: PaymentsService,
     private readonly queueService: QueueService,
     private readonly queueEvents: QueueEventsService,
+    private readonly eventsService: EventsService,
     @InjectQueue(CONFIRM_QUEUE) private readonly confirmQueue: Queue,
   ) {}
 
@@ -123,12 +166,9 @@ export class DemoService {
     return { demoToken };
   }
 
-  async resetDemoEvent() {
-    const event = await this.prisma.event.findFirst({
-      where: { isDemo: true },
-      include: { inventory: true },
-    });
-    if (!event || !event.inventory) {
+  async resetDemoEvent(userId: number) {
+    const event = await this.eventsService.findOrCreateOwnDemoEvent(userId);
+    if (!event.inventory) {
       throw new NotFoundException(
         '데모 이벤트가 없습니다 — seed(prisma db seed)를 먼저 실행하세요.',
       );
@@ -143,9 +183,10 @@ export class DemoService {
 
     // 시뮬레이션이 만든 가상 유저 정리(ADR 0016 2026-08-05 개정) — 안 지우면
     // 리셋을 반복할 때마다 무료 티어 DB에 계정이 계속 쌓인다. 예매를 먼저
-    // 지웠으니 FK 걱정 없이 바로 지울 수 있다.
+    // 지웠으니 FK 걱정 없이 바로 지울 수 있다. 이벤트별로 스코프된 접두사라
+    // 다른 유저가 방금 투입한 가상 유저는 안 건드린다(2026-08-07 유저별 격리).
     await this.prisma.user.deleteMany({
-      where: { email: { startsWith: this.SIM_USER_EMAIL_PREFIX } },
+      where: { email: { startsWith: this.simUserEmailPrefix(event.id) } },
     });
 
     const inventory = await this.prisma.inventory.update({
@@ -179,8 +220,18 @@ export class DemoService {
    * 파이프라인(관문→HELD→큐→확정)에 흘려보낸다. 상한·쿨다운을 통과시킨 뒤
    * 즉시 반환하고(202), 실제 투입은 백그라운드에서 진행한다 — 진행 상황은
    * 방문자가 축 B-2 SSE stats 스트림으로 지켜본다.
+   *
+   * auto=true(이벤트 상세 페이지 마운트 시 자동 투입, 2026-08-07)일 때는
+   * 최대 AUTO_JOIN_GUARANTEE_MAX명까지 대기열 입장이 끝날 때까지 기다렸다가
+   * 응답한다 — 호출부(booking-form.tsx)가 이 응답을 받은 뒤에야 방문자 본인을
+   * 대기열에 넣으므로, 응답이 그 전에 오면 방문자가 항상 0번을 받는 순서
+   * 문제가 있었다.
    */
-  async simulateLoad(virtualUserCount: number): Promise<{ accepted: number }> {
+  async simulateLoad(
+    virtualUserCount: number,
+    userId: number,
+    auto = false,
+  ): Promise<{ accepted: number }> {
     const maxVu = Number(this.config.get<string>('DEMO_SIM_MAX_VU') ?? 300);
     if (virtualUserCount > maxVu) {
       throw new BadRequestException(
@@ -190,11 +241,14 @@ export class DemoService {
 
     // NX(키 없을 때만 SET) + PX(밀리초 TTL) — "쿨다운 중인지 확인 후 잠근다"가
     // 아니라 이 SET 자체가 원자적 확인+잠금이다(둘로 나누면 그 틈에 경합 가능).
-    const cooldownMs = Number(
-      this.config.get<string>('DEMO_SIM_COOLDOWN_MS') ?? 30000,
-    );
+    // auto(페이지 마운트 자동 투입)는 별도 키+훨씬 짧은 쿨다운을 쓴다(위 주석 참고).
+    // 유저별로 분리된 키라(2026-08-07) 다른 유저의 쿨다운엔 영향이 없다.
+    const cooldownKey = auto ? this.autoSimCooldownKey(userId) : this.simCooldownKey(userId);
+    const cooldownMs = auto
+      ? Number(this.config.get<string>('DEMO_SIM_AUTO_COOLDOWN_MS') ?? 3000)
+      : Number(this.config.get<string>('DEMO_SIM_COOLDOWN_MS') ?? 30000);
     const acquired = await this.redis.set(
-      this.SIM_COOLDOWN_KEY,
+      cooldownKey,
       '1',
       'PX',
       cooldownMs,
@@ -207,17 +261,33 @@ export class DemoService {
       );
     }
 
-    const event = await this.prisma.event.findFirst({ where: { isDemo: true } });
-    if (!event) {
-      throw new NotFoundException(
-        '데모 이벤트가 없습니다 — seed(prisma db seed)를 먼저 실행하세요.',
-      );
-    }
+    const event = await this.eventsService.findOrCreateOwnDemoEvent(userId);
 
-    // 컨트롤러 응답을 기다리게 하지 않는다(fire-and-forget) — 실패는 로그로만 남긴다.
-    void this.runSimulationBatches(event.id, virtualUserCount).catch((e) => {
-      this.logger.error('시뮬레이션 배치 처리 중 오류', e);
-    });
+    if (auto) {
+      // 방문자 본인이 대기열에 합류하기 전에 최대 AUTO_JOIN_GUARANTEE_MAX명
+      // 만큼은 실제로 대기열 입장까지 마쳐야 한다 — 안 그러면 방문자의 단순 ZADD
+      // 한 번이 가상 유저의 "User 생성 후 ZADD"보다 항상 먼저 끝나버려
+      // 크라우드 규모와 무관하게 항상 0번을 받는다(2026-08-07 실사용 중 발견,
+      // 프론트도 이 응답을 받은 뒤에야 본인 입장을 호출하도록 짝을 맞췄다).
+      // 나머지 인원은 기존처럼 백그라운드로 이어간다.
+      const firstBatchSize = Math.min(this.AUTO_JOIN_GUARANTEE_MAX, virtualUserCount);
+      await Promise.all(
+        Array.from({ length: firstBatchSize }, () =>
+          this.injectVirtualUser(event.id),
+        ),
+      );
+      const remaining = virtualUserCount - firstBatchSize;
+      if (remaining > 0) {
+        void this.runSimulationBatches(event.id, remaining).catch((e) => {
+          this.logger.error('시뮬레이션 배치 처리 중 오류', e);
+        });
+      }
+    } else {
+      // 컨트롤러 응답을 기다리게 하지 않는다(fire-and-forget) — 실패는 로그로만 남긴다.
+      void this.runSimulationBatches(event.id, virtualUserCount).catch((e) => {
+        this.logger.error('시뮬레이션 배치 처리 중 오류', e);
+      });
+    }
 
     return { accepted: virtualUserCount };
   }
@@ -248,7 +318,7 @@ export class DemoService {
     try {
       const user = await this.prisma.user.create({
         data: {
-          email: `${this.SIM_USER_EMAIL_PREFIX}${randomUUID()}@sunchak.demo`,
+          email: `${this.simUserEmailPrefix(eventId)}${randomUUID()}@sunchak.demo`,
           password: null,
         },
       });
@@ -324,24 +394,27 @@ export class DemoService {
    * 데모 이벤트 존재 확인은 구독 시작 전 한 번만(이후 매 틱마다 이벤트를
    * 다시 찾을 필요 없음 — 리셋은 같은 이벤트 행을 갱신할 뿐 id가 안 바뀐다).
    */
-  async streamStats(): Promise<Observable<MessageEvent>> {
-    const event = await this.prisma.event.findFirst({ where: { isDemo: true } });
-    if (!event) {
-      throw new NotFoundException(
-        '데모 이벤트가 없습니다 — seed(prisma db seed)를 먼저 실행하세요.',
-      );
+  async streamStats(userId: number): Promise<Observable<MessageEvent>> {
+    const event = await this.eventsService.findOrCreateOwnDemoEvent(userId);
+    if (!event.inventory) {
+      throw new NotFoundException('데모 이벤트의 재고를 찾을 수 없습니다.');
     }
     const eventId = event.id;
+    const totalQty = event.inventory.totalQty;
 
     // timer(0, 주기): 구독 즉시 한 번 쏘고, 그 다음부터 주기마다 반복.
     return timer(0, this.STATS_POLL_INTERVAL_MS).pipe(
-      switchMap(() => this.getStats(eventId)),
+      switchMap(() => this.getStats(eventId, userId, totalQty)),
       map((stats) => ({ data: stats }) as MessageEvent),
     );
   }
 
-  private async getStats(eventId: number): Promise<DemoStats> {
-    const [remaining, statusSums, waiting, active, paymentCounts, soldOut, abandoned, queued] =
+  private async getStats(
+    eventId: number,
+    ownerId: number,
+    totalQty: number,
+  ): Promise<DemoStats> {
+    const [remaining, statusSums, waiting, active, paymentCounts, soldOut, abandoned, queued, tickets] =
       await Promise.all([
         this.redis.get(`stock:event:${eventId}`),
         this.prisma.reservation.groupBy({
@@ -359,6 +432,19 @@ export class DemoService {
         this.redis.get(`soldout:event:${eventId}`),
         this.redis.get(`abandoned:event:${eventId}`),
         this.queueService.size(eventId),
+        // 개별 예매를 티켓 카드/그리드로 보여주기 위한 목록(2026-08-07) — 집계
+        // 숫자만으로는 "내가 방금 누른 버튼이 만든 결과"가 안 보인다는 피드백.
+        this.prisma.reservation.findMany({
+          where: { eventId },
+          select: {
+            id: true,
+            userId: true,
+            quantity: true,
+            status: true,
+            payment: { select: { status: true } },
+          },
+          orderBy: { createdAt: 'asc' },
+        }),
       ]);
 
     const sumOf = (status: ReservationStatus) =>
@@ -367,6 +453,7 @@ export class DemoService {
       paymentCounts.find((p) => p.status === status)?._count._all ?? 0;
 
     return {
+      totalQty,
       remainingQty: Number(remaining ?? 0),
       heldCount: sumOf(ReservationStatus.HELD),
       confirmedCount: sumOf(ReservationStatus.CONFIRMED),
@@ -374,6 +461,16 @@ export class DemoService {
       paidCount: countOf(PaymentStatus.PAID),
       failedCount: countOf(PaymentStatus.FAILED),
       soldOutCount: Number(soldOut ?? 0),
+      // 이벤트가 유저별로 격리돼(2026-08-07) 여기 보이는 예매는 항상 "내 실제
+      // 예매 1건 이하 + 내가 투입한 가상 유저들의 예매"뿐이다 — 다른 방문자
+      // 데이터가 섞일 걱정 없이 그대로 리스트로 노출해도 된다.
+      tickets: tickets.map((t) => ({
+        id: t.id,
+        quantity: t.quantity,
+        status: t.status,
+        paymentStatus: t.payment?.status ?? null,
+        isMine: t.userId === ownerId,
+      })),
       abandonedCount: Number(abandoned ?? 0),
       admissionQueueCount: queued,
     };
