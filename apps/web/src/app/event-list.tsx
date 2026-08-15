@@ -1,8 +1,10 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { apiFetch } from "@/lib/api";
+import { QueueNoticeModal } from "./queue-notice-modal";
 
 interface EventItem {
   id: number;
@@ -32,19 +34,55 @@ const STATUS_COLOR: Record<EventItem["status"], string> = {
 // 나머지(매진/오픈예정/종료)는 정적 장식(prisma/seed.ts)일 뿐 클릭 동작이 없다
 // (2026-08-06 수정: 예전엔 전부 클릭 불가였는데, 이벤트 목록이 별도 페이지로
 // 분리되며 "판매중인 것만 들어갈 수 있다"는 제약을 명시적으로 걸었다).
+//
+// ⚠️ 판매중 카드는 <Link>가 아니라 클릭 핸들러다(2026-08-08 재조정) — 예전엔
+// 상세 페이지 마운트 시 대기열 안내 팝업을 띄웠는데, 안내를 읽는 동안 이미
+// BookingForm의 자동 대기열 입장이 진행돼버려 "안내 → 실제 대기열" 체감이
+// 어긋났다. 그래서 순서를 "카드 클릭 → 안내 팝업(선택된 이벤트 기억) → 확인
+// → 그제서야 상세 페이지로 이동"으로 바꿔, 상세 페이지 도착 시점엔 이미
+// 안내를 확인한 뒤가 되도록 했다. QueueNoticeModal이 "이미 봤음"(localStorage)
+// 이면 onAcknowledged를 즉시 호출하므로, 재방문자는 클릭 즉시 바로 이동한다.
 export function EventList() {
+  const router = useRouter();
   const [events, setEvents] = useState<EventItem[] | null>(null);
+  // 응답이 실패(401 등)여도 예전엔 그대로 res.json()의 에러 바디({message,...})를
+  // "이벤트 배열"로 오해해 events.map()에서 그대로 터졌다(2026-08-08 실사용 중
+  // 발견 — 세션 만료/DB 초기화로 로그인 쿠키의 유저가 실제로는 없는 상태가 되면
+  // 백엔드가 500을 주는데, 프론트가 그걸 확인 안 하고 바로 배열처럼 다뤘다).
+  const [error, setError] = useState<string | null>(null);
+  const [selectedEventId, setSelectedEventId] = useState<number | null>(null);
 
   useEffect(() => {
-    apiFetch("/events")
-      .then((res) => res.json())
-      .then((data: EventItem[]) => setEvents(data));
+    apiFetch("/events").then(async (res) => {
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        setError(body?.message ?? "이벤트 목록을 불러오지 못했습니다.");
+        return;
+      }
+      setEvents(await res.json());
+    });
   }, []);
+
+  if (error) {
+    return (
+      <div className="flex w-full max-w-2xl flex-col gap-3 rounded-lg border border-zinc-200 p-4 dark:border-zinc-800">
+        <p className="text-sm text-[#d03b3b]">{error}</p>
+        <Link href="/" className="text-sm text-zinc-600 underline dark:text-zinc-400">
+          다시 로그인하기
+        </Link>
+      </div>
+    );
+  }
 
   if (!events) return null;
 
   return (
     <div className="flex w-full max-w-2xl flex-col gap-3">
+      {selectedEventId !== null && (
+        <QueueNoticeModal
+          onAcknowledged={() => router.push(`/events/${selectedEventId}`)}
+        />
+      )}
       <h2 className="text-sm font-medium text-zinc-700 dark:text-zinc-300">이벤트 목록</h2>
       <div className="flex flex-col gap-2">
         {events.map((event) => {
@@ -66,9 +104,13 @@ export function EventList() {
             </div>
           );
           return enterable ? (
-            <Link key={event.id} href={`/events/${event.id}`} className="rounded-lg hover:opacity-80">
+            <button
+              key={event.id}
+              onClick={() => setSelectedEventId(event.id)}
+              className="rounded-lg text-left hover:opacity-80"
+            >
               {card}
-            </Link>
+            </button>
           ) : (
             <div key={event.id}>{card}</div>
           );
