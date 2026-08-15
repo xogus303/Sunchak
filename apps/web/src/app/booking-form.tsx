@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { apiFetch, apiUrl } from "@/lib/api";
+import { TicketCard } from "./ticket-card";
 
 // 대기열 SSE 스냅샷(백엔드 QueueStatus, ADR 0017)과 모양을 맞춘다.
 interface QueueSnapshot {
@@ -19,14 +20,18 @@ interface BookingFormProps {
 //   idle(대기열 입장 전) → queued(대기 중, 순번) → admitted(내 차례, 수량 선택)
 //   → held(관문 통과, 결제 대기) → paying(결제 요청, PENDING) → confirmed(결제 성공)
 //   / cancelled(결제 실패, 좌석 반환) / expired(허가창 놓침) / error(예매 자체 실패)
+// held 이후 단계는 티켓 카드로 표시하므로(2026-08-07) 카드에 필요한 quantity를
+// 상태 전이 시점에 함께 실어 나른다 — 렌더 시점에 외부 입력값(qtyInput)을 다시
+// 참조하면, "다시 예매하기"로 새 수량을 입력하는 동안 이전 티켓 카드의 수량까지
+// 같이 바뀌어 보이는 문제가 생긴다.
 type FlowState =
   | { phase: "idle" }
   | { phase: "queued"; rank: number }
   | { phase: "admitted" }
-  | { phase: "held"; reservationId: number }
-  | { phase: "paying"; reservationId: number }
-  | { phase: "confirmed" }
-  | { phase: "cancelled" }
+  | { phase: "held"; reservationId: number; quantity: number }
+  | { phase: "paying"; reservationId: number; quantity: number }
+  | { phase: "confirmed"; quantity: number }
+  | { phase: "cancelled"; quantity: number }
   | { phase: "expired" }
   | { phase: "error"; message: string };
 
@@ -63,7 +68,7 @@ export function BookingForm({ eventId, eventTitle }: BookingFormProps) {
     return () => source.close();
   }, [eventId, isWaitingForAdmission]);
 
-  async function handleJoinQueue() {
+  const handleJoinQueue = useCallback(async () => {
     const res = await apiFetch(`/events/${eventId}/queue`, { method: "POST" });
     if (!res.ok) {
       // /events/[id]가 별도 페이지로 분리되며(2026-08-06) 로그인 전에도 이 화면에
@@ -73,7 +78,62 @@ export function BookingForm({ eventId, eventTitle }: BookingFormProps) {
       return;
     }
     setState({ phase: "queued", rank: 0 });
-  }
+  }, [eventId]);
+
+  // 방문자가 이 이벤트를 선택하는 순간(마운트 시점) 자동으로 소규모~중간
+  // 랜덤 규모(5~100명)의 가상 유저를 먼저 흘려보내 실제 경쟁 상황을 만들고,
+  // 방문자 본인도 자동으로 대기열에 입장시킨다 — "버튼을 눌러야 뭔가 보인다"가
+  // 아니라 들어오자마자 선착순 경쟁을 몸으로 느끼게 하려는 목적(2026-08-07).
+  // 순번 자체를 조작하는 게 아니라, 경쟁 인원수를 랜덤화해서 매번 다른 순번이
+  // "실제로" 부여되게 한다 — ADR 0017의 "가짜 우선순위 없음" 원칙은 그대로 유지.
+  // handleJoinQueue를 그대로 호출하지 않고 fetch·then 콜백 안에서 setState하는
+  // 형태로 풀어 쓴 이유 — react-hooks/set-state-in-effect 린트가 "effect 본문에서
+  // setState하는 함수를 직접 호출하는 패턴"을 지적해서, "외부 이벤트(fetch 응답)에
+  // 반응해 콜백에서 setState"하는 권장 형태로 맞췄다(동작은 handleJoinQueue와 동일).
+  //
+  // ⚠️ 두 요청을 동시에 쏘지 않고 반드시 순서대로(simulate 응답 → 그 다음 join)
+  // 보낸다 — 동시에 쏘면 방문자 본인의 입장(단순 ZADD 한 번)이 가상 유저의
+  // 입장(User 생성 후 ZADD, 훨씬 느림)보다 항상 먼저 끝나 크라우드 규모와
+  // 무관하게 늘 0번을 받는 문제가 있었다(2026-08-07 실사용 중 발견). 백엔드도
+  // auto=true일 때 최대 AUTO_JOIN_GUARANTEE_MAX(100)명 입장이 끝난 뒤에야
+  // 응답하도록 맞춰뒀다.
+  //
+  // ⚠️ ref 가드가 필요한 이유 — Next.js App Router는 개발 모드에서 React
+  // StrictMode가 기본 켜져 있어, 마운트 시 이 effect가 "일부러" 두 번 실행된다.
+  // 가드 없이 두면: 1번째 실행이 크라우드 투입을 기다리는 동안, 2번째 실행의
+  // simulate 요청은 3초 쿨다운에 걸려 즉시 거부(429)되고 → 기다릴 게 없으니
+  // 곧바로 본인 입장을 호출해 1번째 실행의 크라우드보다 먼저 큐에 서버린다
+  // (ZADD가 NX라 최초 타임스탬프만 유지 — 이 "새치기"가 영구 순번이 됨).
+  // 그 결과 대기열에 수십 명이 찍혀도 본인은 항상 0번을 받는 버그가 있었다
+  // (2026-08-07 실사용 중 발견). ref는 클린업으로도 안 지워지므로 두 번째
+  // 실행을 확실히 막는다.
+  // ⚠️ 대기열 안내 팝업(queue-notice-modal.tsx)은 이제 이 페이지가 아니라
+  // 이벤트 목록(event-list.tsx)에서 "이벤트 선택 → 안내 확인 → 그제서야 이동"
+  // 순서로 먼저 끝난 뒤에만 이 페이지에 도달한다(2026-08-08 재조정) — 그래서
+  // 여기 도착했다는 것 자체가 이미 안내를 확인했다는 뜻이라, 이 effect는
+  // 별도 게이트 없이 마운트되면 곧바로 시작해도 된다.
+  const hasStartedRef = useRef(false);
+  useEffect(() => {
+    if (hasStartedRef.current) return;
+    hasStartedRef.current = true;
+
+    const crowdSize = Math.floor(Math.random() * 96) + 5; // 5~100명
+    apiFetch("/demo/simulate", {
+      method: "POST",
+      body: JSON.stringify({ virtualUserCount: crowdSize, auto: true }),
+    })
+      .catch(() => {}) // 쿨다운(429) 등은 조용히 무시 — 방금 다른 방문자가 이미 투입했을 뿐
+      .then(() =>
+        apiFetch(`/events/${eventId}/queue`, { method: "POST" }).then(async (res) => {
+          if (!res.ok) {
+            const body = await res.json().catch(() => null);
+            setState({ phase: "error", message: body?.message ?? "대기열 입장에 실패했습니다." });
+            return;
+          }
+          setState({ phase: "queued", rank: 0 });
+        }),
+      );
+  }, [eventId]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -89,12 +149,12 @@ export function BookingForm({ eventId, eventTitle }: BookingFormProps) {
       return;
     }
     const reservation = await res.json();
-    setState({ phase: "held", reservationId: reservation.id });
+    setState({ phase: "held", reservationId: reservation.id, quantity });
   }
 
   async function handlePay() {
     if (state.phase !== "held") return;
-    const reservationId = state.reservationId;
+    const { reservationId, quantity: heldQuantity } = state;
     const res = await apiFetch(`/reservations/${reservationId}/pay`, {
       method: "POST",
       body: JSON.stringify({ idempotencyKey: crypto.randomUUID() }),
@@ -104,7 +164,7 @@ export function BookingForm({ eventId, eventTitle }: BookingFormProps) {
       setState({ phase: "error", message: body?.message ?? "결제 요청에 실패했습니다." });
       return;
     }
-    setState({ phase: "paying", reservationId });
+    setState({ phase: "paying", reservationId, quantity: heldQuantity });
   }
 
   // HELD든 결제 요청 중(paying)이든, 이 예매 하나의 최종 상태(CONFIRMED/CANCELLED)를
@@ -112,6 +172,8 @@ export function BookingForm({ eventId, eventTitle }: BookingFormProps) {
   // 방송 하나만 듣는다는 설계를 그대로 재사용).
   const reservationId =
     state.phase === "held" || state.phase === "paying" ? state.reservationId : null;
+  const inFlightQuantity =
+    state.phase === "held" || state.phase === "paying" ? state.quantity : 0;
   useEffect(() => {
     if (reservationId === null) return;
     const source = new EventSource(apiUrl(`/reservations/${reservationId}/stream`), {
@@ -120,26 +182,21 @@ export function BookingForm({ eventId, eventTitle }: BookingFormProps) {
     source.onmessage = (event) => {
       const payload = JSON.parse(event.data) as { status: string };
       if (payload.status === "CONFIRMED") {
-        setState({ phase: "confirmed" });
+        setState({ phase: "confirmed", quantity: inFlightQuantity });
       } else if (payload.status === "CANCELLED") {
-        setState({ phase: "cancelled" });
+        setState({ phase: "cancelled", quantity: inFlightQuantity });
       }
       source.close();
     };
     return () => source.close();
-  }, [reservationId]);
+  }, [reservationId, inFlightQuantity]);
 
   return (
     <div className="flex w-full max-w-2xl flex-col gap-3 rounded-lg border border-zinc-200 p-4 dark:border-zinc-800">
       <h2 className="text-sm font-medium text-zinc-700 dark:text-zinc-300">내 예매 — {eventTitle}</h2>
 
       {state.phase === "idle" && (
-        <button
-          onClick={handleJoinQueue}
-          className="self-start rounded-full bg-foreground px-5 py-2 text-sm font-medium text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc]"
-        >
-          대기열 입장
-        </button>
+        <p className="text-sm text-zinc-500">대기열 입장 중...</p>
       )}
 
       {state.phase === "queued" && (
@@ -177,28 +234,37 @@ export function BookingForm({ eventId, eventTitle }: BookingFormProps) {
       )}
 
       {state.phase === "held" && (
-        <div className="flex items-center gap-3">
-          <p className="text-sm text-zinc-600 dark:text-zinc-400">
-            재고를 확보했습니다(HELD) — 30초 내 결제를 완료해 주세요.
-          </p>
+        <TicketCard
+          quantity={state.quantity}
+          status="HELD"
+          paymentStatus={null}
+          isMine
+          reservationId={state.reservationId}
+        >
           <button
             onClick={handlePay}
-            className="rounded-full bg-foreground px-5 py-2 text-sm font-medium text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc]"
+            className="rounded-full bg-foreground px-4 py-1.5 text-sm font-medium text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc]"
           >
             결제하기
           </button>
-        </div>
+        </TicketCard>
       )}
 
       {state.phase === "paying" && (
-        <p className="text-sm text-zinc-600 dark:text-zinc-400">결제 처리 중(PENDING)... 잠시만 기다려 주세요.</p>
+        <TicketCard
+          quantity={state.quantity}
+          status="HELD"
+          paymentStatus="PENDING"
+          isMine
+          reservationId={state.reservationId}
+        />
       )}
 
       {state.phase === "confirmed" && (
         <div className="flex flex-col gap-2">
-          <p className="text-sm font-medium text-[#0ca30c]">결제가 완료돼 예매가 확정됐습니다.</p>
+          <TicketCard quantity={state.quantity} status="CONFIRMED" paymentStatus="PAID" isMine />
           <button
-            onClick={() => setState({ phase: "idle" })}
+            onClick={handleJoinQueue}
             className="self-start rounded-full border border-zinc-300 px-4 py-1.5 text-sm text-zinc-700 dark:border-zinc-700 dark:text-zinc-300"
           >
             다시 예매하기
@@ -208,9 +274,9 @@ export function BookingForm({ eventId, eventTitle }: BookingFormProps) {
 
       {state.phase === "cancelled" && (
         <div className="flex flex-col gap-2">
-          <p className="text-sm text-[#d03b3b]">결제에 실패해 좌석이 반환됐습니다.</p>
+          <TicketCard quantity={state.quantity} status="CANCELLED" paymentStatus="FAILED" isMine />
           <button
-            onClick={() => setState({ phase: "idle" })}
+            onClick={handleJoinQueue}
             className="self-start rounded-full border border-zinc-300 px-4 py-1.5 text-sm text-zinc-700 dark:border-zinc-700 dark:text-zinc-300"
           >
             다시 예매하기
@@ -234,7 +300,7 @@ export function BookingForm({ eventId, eventTitle }: BookingFormProps) {
         <div className="flex flex-col gap-2">
           <p className="text-sm text-[#d03b3b]">{state.message}</p>
           <button
-            onClick={() => setState({ phase: "idle" })}
+            onClick={handleJoinQueue}
             className="self-start rounded-full border border-zinc-300 px-4 py-1.5 text-sm text-zinc-700 dark:border-zinc-700 dark:text-zinc-300"
           >
             다시 시도
