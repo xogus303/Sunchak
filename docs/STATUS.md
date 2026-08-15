@@ -5,7 +5,7 @@
 > - **세션 시작 시**: 이 파일을 가장 먼저 읽고 "다음 할 일"부터 이어간다.
 > - **세션 끝 / 커밋 전**: 이 파일을 **덮어써서** 최신 상태로 갱신한다. (시간순 이력·삽질은 `DEVLOG.md`, 결정 근거는 `decisions/`)
 
-**마지막 업데이트:** 2026-08-06 (**"입장 대기중" 지표 추가** — 입장 대기열(ADR 0017)에서 아직 허가를 못 받은 인원 수를 처음으로 노출(`QueueService.size()`+`DemoStats.admissionQueueCount`). 실서버로 40명 투입 1초 후 `admissionQueueCount:20, abandonedCount:4`(첫 배치 20명 중 정확히 20% 포기)가 실시간으로 보이는 것 확인. 그 직전엔 이벤트 상세 페이지에 예매+판매현황+가상유저투입을 한 화면에 합치고 "포기(abandoned)" 지표를 신설해 `투입 인원수 = paid+failed+soldOut+abandoned` 등식이 실측으로 맞아떨어지는 것 확인. 그 전엔 이벤트 목록 별도 페이지 분리 + 결제 TTL 5분→30초 단축 + `demo` 도메인 개념 정리, 그 이전엔 실사용 중 발견한 버그 3건(BullMQ 스케줄러 파괴/가상유저 결제 누락/리셋이 대기열 안 비움) 수정 완료. **다음은 배포(6개 조각)뿐 — PRD 갭 전부 처리 완료**)
+**마지막 업데이트:** 2026-08-08 (**"서버 재실행 후 새로고침하면 events.map is not a function" 버그 수정** — `jest`가 로컬 DB를 통째로 비운 뒤에도 브라우저의 로그인 쿠키(JWT)가 그대로 남아, 서명·만료는 유효하지만 실제로는 없는 유저로 인증이 통과돼 `Event.create({demoOwnerId})`가 FK 위반(500)으로 죽고, 프론트가 그 에러 바디를 배열로 오해해 `.map()`에서 크래시하던 문제. `JwtStrategy.validate()`가 DB로 유저 존재를 한 번 더 확인하도록 고쳐 근본 해결(없으면 401), `event-list.tsx`도 `res.ok` 미확인 문제를 고쳐 에러 시 크래시 대신 "다시 로그인하기" 링크를 보여줌. 실제 유저를 삭제해 시나리오를 재현·검증 완료(수정 전 500 → 수정 후 401). API 87개, web 40개 그린. 오늘 안에 있었던 다른 작업(판매 현황 게이지+퍼센티지 막대 재구성, 티켓 문구 정정, ADR 0010/0013 개정)은 아래 "완료" 목록 참고. 이번 세션 작업은 아직 미커밋. **다음은 ADR 0011 결정(사용자 검토 중) → 배포 6단계**)
 
 ---
 
@@ -141,6 +141,68 @@
   - **부수 질문 대응**: 구현 직전 사용자가 "재고가 있는데도 포기가 뜨는 게 이상하다"고 질문 — abandonedCount는 **재고와 무관**하게 ① 확률적 포기(20%, 예매 시도 자체를 안 함) ② 입장 허가창(8초) 초과로 인한 자연 만료(랜덤 지연이 최대 10초라 창보다 길 수 있음) 두 경로로만 증가한다는 걸 코드 위치(라인 275, 299)로 설명 — 재고 소진(soldOutCount)과는 원인이 다른 별개 지표임을 확인.
   - **테스트**: `queue.service.spec.ts`(+1, `size`) · `demo.service.spec.ts`(stats 테스트에 `admissionQueueCount` 포함, `QueueService.join()`으로 대기 인원 시뮬레이션). **API 75→76 그린.** `demo-dashboard.test.tsx`(SSE 스냅샷에 admissionQueueCount 포함). **web 20개 유지**(기존 테스트 보강).
   - **실서버 검증**: 리셋 후 40명 투입 1초 후 스냅샷 → `admissionQueueCount:20, abandonedCount:4` — 40명 중 첫 배치 20명만 허가 처리되고 나머지 20명이 대기 중, 허가받은 20명 중 정확히 20%(4명)가 포기한 것까지 실시간으로 확인.
+- **✅ 전체 작업 커밋 (2026-08-07, `c8275a7`)**: 이 세션에서 쌓인 대기열(ADR 0017)·모의결제(ADR 0018)·버그수정 3건·지표 3종·화면 재구성을 55개 파일 하나의 커밋으로 정리. 커밋 직전 사용자가 리포트한 "가상유저 200명 투입했는데 재고소진+결제성공 합이 200과 안 맞는다"는 의심을 DB/Redis 실측으로 재검증 — `sim-` 유저 실제 생성 수(200명, 사용자가 기억한 "50+100=150"과 달랐음) + 실사용자 1명 = 201명, `paidCount(96)+failedCount(12)+soldOutCount(22)+abandonedCount(71)=201`로 **정확히 일치**함을 확인(버그 아님, 사용자의 회차 기억과 실제 투입량 차이였을 뿐). `confirmedCount`가 건수가 아니라 **수량 합**이라는 점도 함께 설명(96건 중 가상유저 95건×1개+실사용자 1건×5개=100).
+- **✅ 방문 즉시 자동 대기열 입장 + 랜덤 크라우드 투입 (2026-08-07)**: 사용자 피드백 — "이벤트 상세에 들어갔을 때 어떻게 테스트해야 할지 직관적이지 않다. 가상유저 투입+대기열 진입을 수동으로 하지 않고, 이벤트를 선택하는 순간 자동으로 경쟁 상황에 놓이면 좋겠다. 단, 순번 자체를 가짜로 랜덤화하는 게 아니라 앞에 서는 인원수를 랜덤화해서 결과적으로 순번이 매번 달라지게."
+  - **구현**: `booking-form.tsx`가 마운트되는 순간(이벤트 상세 페이지 진입 시점) ① `POST /demo/simulate`로 5~40명 랜덤 규모 가상 유저를 fire-and-forget 투입(쿨다운 429 등은 조용히 무시 — 방금 다른 방문자가 이미 투입한 것뿐이라 문제 없음) ② 방문자 본인도 자동으로 `POST /events/:id/queue` 호출해 대기열 입장. 기존 "대기열 입장" 수동 버튼은 제거(idle 단계는 "대기열 입장 중..." 안내 문구로 대체). "다시 대기열 입장"(허가창 만료 시 재시도) 버튼은 그대로 수동 유지.
+  - **설계 원칙 재확인**: ADR 0017에서 이미 기각했던 "가상 유저 순번 랜덤화"와는 다른 제안임을 사용자가 명확히 함 — 순번은 여전히 실제 도착 순서(FIFO) 그대로 부여하고, 그 앞에 서는 **경쟁 인원수 자체를 랜덤화**해 결과적으로 방문마다 대기 시간이 달라 보이게 하는 방식. 가짜 데이터·특수 경로 없음 원칙 유지.
+  - **레이아웃**: `events/[id]/page.tsx`에서 BookingForm(예매)과 DemoDashboard(판매현황)를 넓은 화면에서 좌우 2단 패널로 배치(`lg:flex-row`), 좁은 화면은 기존처럼 세로 스택.
+  - **린트 삽질**: `useEffect` 본문에서 `handleJoinQueue()`(내부에서 setState하는 함수)를 직접 호출했더니 `react-hooks/set-state-in-effect` 규칙이 걸림(React 19/Next 16 신규 린트, "effect 안에서 setState하는 함수를 직접 호출하지 말고, 외부 이벤트에 반응하는 콜백 안에서 setState하라") — `apiFetch(...).then(async (res) => { setState(...) })` 형태로 풀어써서 해결(동작은 동일, "다시 대기열 입장" 버튼용 `handleJoinQueue`는 그대로 유지).
+  - **테스트**: `booking-form.test.tsx` 전면 개정 — 모든 테스트가 이제 자동 대기열 입장을 전제로 하고, `/demo/simulate` 호출을 공통 mock에 포함하는 `baseFetchMock` 헬퍼 도입. 신규 테스트 1건("마운트되면 자동으로 대기열에 입장"). **web 20→21 그린.**
+  - **실서버 e2e(Playwright)**: 게이트→로그인→이벤트 클릭 → 버튼 클릭 없이 "대기 중입니다 — 현재 순번 0" 자동 표시, 좌우 2단 레이아웃 스크린샷으로 확인. 콘솔에 429 로그가 한 번 찍혔는데(직전 테스트들의 쿨다운이 아직 안 풀려 이번 회차의 크라우드 투입이 스킵된 것) 기능은 정상 진행됨 — 버그 아님.
+- **✅ 자동 크라우드 투입 전용 쿨다운 분리 (2026-08-07)**: 사용자가 "뒤로 가기 후 재입장하면 새 크라우드가 안 들어가고 바로 0번으로 입장된다 — 대기열 초기화+재투입 플로우가 빠졌나?"라고 재현·확인 요청.
+  - **원인**: 두 정상 동작이 겹친 것 — ① `AdmissionProcessor`가 2초마다 20명씩 허가 처리해 5~40명 크라우드가 2~4초 안에 대기열에서 빠짐(사람 손보다 빠름) ② 마운트 자동 투입이 수동 "가상 유저 투입" 버튼용으로 설계된 기존 30초 쿨다운을 그대로 공유해서, 30초 안에 재입장하면 새 크라우드 자체가 안 들어감. "대기열을 마운트마다 초기화"는 애초에 계획에 없었음을 확인(다른 방문자의 순번을 지우는 부작용 발생).
+  - **해결**: 사용자가 세 옵션(자동 전용 짧은 쿨다운/전역 쿨다운 단축/그대로 둠) 중 첫 번째 선택. `SimulateDto.auto?: boolean` 추가, `DemoService.simulateLoad(count, auto)`가 `auto` 여부에 따라 다른 Redis 키+쿨다운 시간 사용: 수동은 `demo:sim:cooldown`(30초, `DEMO_SIM_COOLDOWN_MS`) 그대로, 자동은 신규 `demo:sim:auto-cooldown`(3초, `DEMO_SIM_AUTO_COOLDOWN_MS`). `booking-form.tsx`의 마운트 호출에 `auto:true` 추가.
+  - **테스트**: `demo.service.spec.ts` 신규 1건(수동/자동 쿨다운이 서로 안 막는 것 확인). **API 76→77 그린.**
+  - **실서버 검증**: `auto:true` 연속 2회 즉시 요청 → 1번째 성공, 2번째 429, 3초 대기 후 3번째 성공. 수동 요청 직후 곧바로 auto 요청도 성공(서로 완전히 독립) 확인.
+- **✅ 자동 투입 시 방문자가 항상 0번을 받던 순서 버그 수정 (2026-08-07)**: 사용자가 "테스트해보니 항상 순번이 0인 것 같다, 사전 투입 가상유저 수를 늘려야 하나"라고 질문.
+  - **원인(수치 문제 아니라 순서 문제)**: `booking-form.tsx`가 `/demo/simulate`(가상 유저 투입)와 방문자 본인의 `/events/:id/queue`(대기열 입장)를 서로 기다리지 않고 거의 동시에 발사하고 있었다. `/demo/simulate`는 202를 **즉시** 반환하고 실제 투입(User row 생성+ZADD)은 그 이후 백그라운드에서 진행되는 반면, 방문자 본인의 입장은 이미 로그인된 유저라 **ZADD 한 번**뿐이라 훨씬 빠르다 — 그래서 가벼운 작업(방문자)이 무거운 작업(가상 유저 대량 생성)보다 항상 먼저 끝나 크라우드 규모와 무관하게 늘 0번을 받았다. **인원수를 늘려도 순서 자체는 안 바뀌므로 해결이 안 됨**을 설명.
+  - **수정**: `DemoService.simulateLoad(count, auto)`가 `auto=true`일 때 신규 상수 `AUTO_JOIN_GUARANTEE_MAX`(100명)까지는 응답 전에 실제로 대기열 입장을 마치도록 동기 대기(그 이상은 기존처럼 백그라운드) — 프론트의 현재 랜덤 크라우드 범위(5~40명)가 전부 이 안에 들어와 매번 크라우드 전원이 방문자보다 먼저 대기열에 서게 된다. `booking-form.tsx`도 `/demo/simulate` 응답을 받은 **다음에야** `/events/:id/queue`를 호출하도록 `.then()` 체이닝으로 순서를 강제(기존엔 두 요청이 순서 보장 없이 거의 동시에 발사됐음).
+  - **후속 요청**: 사용자가 "시뮬레이션 첫 배치를 최대 100으로 늘릴게요"라고 하여, 기존에 재사용하려던 `SIM_BATCH_SIZE`(20, 대시보드 관찰용 배치 리듬 상수)와는 목적이 다른 별도 상수(`AUTO_JOIN_GUARANTEE_MAX=100`)로 분리해 반영 — `SIM_BATCH_SIZE`를 그대로 100으로 바꿨다면 수동 대량 시뮬레이션(최대 300명)의 관찰 리듬까지 함께 바뀌어버렸을 것이라 분리가 필요했다.
+  - **테스트**: `demo.service.spec.ts` 신규 1건(auto=true 응답 직후 대기열 크기가 요청한 인원수와 정확히 일치하는지 확인). **API 77→78 그린.**
+  - **실서버 검증**: `simulate(20명, auto)` → 0.136초 만에 응답 + 그 시점에 대기열 20명 확인 → 방문자 join 시 정확히 **20번** 수신(이전엔 항상 0번). 90명(100 상한 이내)도 0.138초 만에 전원 동기 처리 확인.
+- **✅ 위 수정 후에도 여전히 0번 — 진짜 원인은 React StrictMode 이중 마운트 (2026-08-07)**: 백엔드 순서 보장까지 붙였는데도 사용자가 "여전히 0번, 대기열 45명 찍혀도 0번"이라고 재현. `curl`로 순서만 단독 검증했을 땐 정상이었는데 실제 브라우저에서만 재발한 게 단서였다.
+  - **원인**: Next.js App Router는 개발 모드에서 `reactStrictMode`가 기본 `true`라, React가 마운트 시 effect를 **의도적으로 두 번** 실행한다(부수효과 버그 탐지 목적). 가드 없는 크라우드투입+본인입장 effect가 두 번 실행되며: 1번째 실행이 크라우드 투입을 기다리는 동안, 2번째 실행의 `/demo/simulate`는 자동 쿨다운(3초)에 걸려 즉시 거부(429) → 기다릴 게 없으니 곧바로 본인 입장을 호출해 **1번째 실행의 크라우드보다 먼저** 큐에 서버렸다. ZADD가 NX(최초 타임스탬프만 유지)라 이 "새치기"가 그대로 영구 순번이 됐다 — 그래서 대기열엔 수십 명이 찍혀도 본인은 항상 0번.
+  - **수정**: `booking-form.tsx`에 `useRef(false)` 가드 추가 — 클린업으로도 안 지워지는 ref로 effect의 실질 실행을 1회로 제한(StrictMode 이중 호출에 안전한 표준 패턴). 겸사겸사 가상 유저 자동 투입 상한을 40→100으로 확대(사용자 요청).
+  - **테스트**: `booking-form.test.tsx`에 `<StrictMode>`로 실제로 감싸 렌더링해 이중 마운트를 재현하는 회귀 테스트 추가 — `/demo/simulate`·`/events/1/queue` 호출이 정확히 1번씩만 나가는지 확인. **web 21→22 그린.**
+  - **실서버 검증(dev 서버, StrictMode 활성 상태 그대로)**: Playwright로 실제 게이트→로그인→이벤트 진입 → 방문자가 **99명 중 78번**을 받는 것으로 확인(수정 전엔 크라우드 규모와 무관하게 항상 0번). 콘솔 에러 0.
+  - **교훈**: React StrictMode의 이중 effect 실행은 "테스트 환경에서만 도는 이상한 것"이 아니라 **실제 개발 서버 어디서나 상시 활성화**돼 있다 — 마운트 시 부수효과(특히 네트워크 요청)가 있는 effect는 반드시 idempotent하거나 ref로 1회 실행을 보장해야 한다. `curl`로 백엔드 로직만 단독 검증했을 땐 이 문제가 전혀 안 드러나 원인 파악이 늦어졌다(브라우저 재현이 필수였던 사례).
+- **✅ "목록↔상세 반복 재진입 시 대기 없이 즉시 허가" 버그 수정 (2026-08-07)**: 사용자가 스크린샷과 함께 "첫 진입은 정상인데, 이벤트 목록으로 돌아갔다가 다시 상세에 진입하면 가상유저 대기열이 수십 개 쌓여있어도 대기 없이 바로 예매 인풋이 뜬다. 반복하면 두 상황이 번갈아 나오고 그것도 1:1은 아니다"라고 재현.
+  - **가설 2개를 추측 대신 직접 재현해 검증**: ① Next.js 클라이언트 라우터 캐시가 컴포넌트 상태를 보존하는 경우 ② 이전 방문의 입장 허가(TTL 8초)가 재입장 시에도 그대로 유효한 경우. `curl`로 실사용자를 만들어 ①허가 받기 → ②다른 가상유저 40명 즉시 투입 → ③곧바로 재입장(`join` 재호출)을 재현한 결과 `{"rank":20,"admitted":true}` — **새 순번(20)은 정상 부여됐지만 이전 허가(admitted:true)가 안 지워진 채 같이 응답**되는 것을 직접 확인. 프론트는 `admitted`를 rank보다 먼저 검사하므로 즉시 "허가됨" 화면으로 튀어버림.
+  - **원인**: `QueueService.join()`은 대기열(ZSet)에만 ZADD할 뿐, 그 사용자의 기존 `admitted:event:{id}:{userId}` 키(TTL 8초)는 전혀 건드리지 않았다. 재입장이 "새로 기다리기 시작"을 뜻한다면, 과거에 받은 허가는 그 시점에 무효화돼야 하는데 안 그러고 있었다.
+  - **수정**: `join()`이 ZADD 전에 해당 사용자의 admitted 키를 먼저 `DEL`하도록 추가 — 재입장은 항상 "허가 상태 초기화 + 새 순번 부여"가 되도록 통일.
+  - **테스트**: `queue.service.spec.ts` 신규 1건(허가 후 재입장하면 이전 허가가 무효화되고 새 순번으로 대기하는지 확인). **API 78→79 그린**(같은 파일의 무관한 admission 배치 카운트 테스트가 1회 flake 있었으나 재실행 시 79/79 정상 — 기존에도 문서화된 패턴).
+  - **실서버 검증**: Playwright로 목록↔상세를 5회 반복 재진입 — 즉시허가로 튄 경우 **0/5**(수정 전엔 재현 가능했음).
+- **✅ 자동 대기열 입장 — "제품 관점 정답은 아님"을 ADR에 정직하게 기록 (2026-08-07)**: 사용자가 "실제 대량 트래픽 티케팅 구조가 테스트 편의 때문에 잘못된 방향으로 가고 있는 건 아닌지" 우려 제기 — 점검 결과 핵심 파이프라인·대부분의 데모 장치는 문제 없었으나, "페이지 진입 즉시 자동 대기열 입장"만은 실제 서비스라면 "구경"과 "구매 의도"를 구분해야 정상인데 이 프로젝트는 안 그렇다는 걸 인정. 매출 없는 학습/시연 목적이라 그 구분의 실익이 없다고 판단해 **유지하기로 확정**(버튼 방식으로 되돌리면 캐주얼 방문자가 대기열을 한 번도 안 겪고 이탈하기 쉬움). `docs/decisions/0017-admission-queue.md`에 "제품 관점 정답은 아닌 의도적 예외"로 정직하게 기록.
+- **✅ 유저별 데모 격리 + 예매를 티켓 카드로 시각화 (2026-08-07)**: 두 기기 동시 테스트 재현성 요구(§9)와 "데모 이벤트 전역 공유" 구조가 충돌한다는 걸 실측 확인 + 같은 대화에서 "예매 상태가 HELD 문구만으론 안 와닿는다, 티켓 카드로 보여주면 어떨까"라는 제안을 받아 **두 가지 다 구현**.
+  - **격리 구조**: `Event.demoOwnerId Int? @unique`(유저 1:1) 추가(마이그레이션 `20260807180000_add_event_demo_owner`, 비대화형 환경이라 `migrate diff`로 DDL 추출 후 수동 작성+`migrate deploy`). `EventsService.findOrCreateOwnDemoEvent(userId)` 신설(없으면 그 자리에서 생성), `findAll`도 `(isDemo:false) OR (demoOwnerId:내id)`로 필터. `DemoService`의 `resetDemoEvent`/`simulateLoad`/`streamStats`가 전부 `userId`를 받도록 변경 + `EventsController`/`DemoController` 관련 라우트에 로그인 가드 추가. 시뮬레이션 쿨다운도 유저별 키로 분리, 가상 유저 이메일 접두사도 `sim-{eventId}-`로 스코프(다른 유저 리셋이 서로의 가상 유저를 안 건드림). `prisma/seed.ts`에서 전역 데모 이벤트 시딩 제거(첫 방문이 자동 생성).
+  - **판단 근거**: 모든 Redis 키가 이미 `eventId`로 네임스페이스돼 있어(`stock:event`, `queue:event`, `soldout:event`, `abandoned:event`, `admitted:event:{id}:{userId}`), "유저별 세션 분리"가 아니라 "유저마다 `eventId` 하나"만 있으면 다운스트림은 자동 격리됨을 확인 — ADR 0016(2026-07-21)이 이 대안을 "복잡도 과함(오버엔지니어링)"으로 기각했던 판단이 Superseded됨.
+  - **실측으로 발견·수정한 버그**: 2계정 실서버 검증 중, 새로 만든 데모 이벤트에 가상 유저 20명을 투입하니 재고 100/100인데도 전원이 "재고가 부족합니다"로 실패하는 걸 발견. 원인 — `ReservationsService.createHeld`가 재고 차감에 쓰는 Redis 키 `stock:event:{id}`는 원래 `resetDemoEvent()`에서만 초기화됐는데, 이벤트가 이제 "첫 방문 시 자동 생성"되며 그 경로를 안 거치게 됨 — `ReconcileProcessor`(1분 주기)가 재계산해주기 전까지 신규 이벤트는 실제 재고와 무관하게 모든 예매가 즉시 실패했다. `EventsService.create`/`findOrCreateOwnDemoEvent`가 이벤트 생성 시점에 직접 이 키를 심도록 수정(데모뿐 아니라 관리자가 만드는 일반 이벤트에도 잠재하던 버그). ADR 0016에 경위 기록.
+  - **프론트 — 티켓 카드**: 신규 공용 `ticket-card.tsx`(수량·상태 배지·"내 예매" 표시, 상태별 색: HELD=amber/CONFIRMED=green/CANCELLED=red). `booking-form.tsx`의 HELD/결제중/확정/취소 단계를 텍스트 문구 대신 이 카드로 교체(수량을 상태 전이 시점에 실어 날라 이후 입력값 변경에 영향 안 받게 함). `demo-dashboard.tsx`는 SSE `DemoStats`에 추가된 `tickets: TicketSummary[]`(백엔드가 `isMine` 계산해 내려줌 — 격리 덕에 안전)를 이 카드로 그리드 렌더링, "예매 티켓 목록 (N건)" 섹션 신설.
+  - **검증**: 백엔드 tsc/jest 전수(84/84, 2회 연속 클린) — `events.service.spec.ts`에 `findOrCreateOwnDemoEvent`/`findAll` 신규 테스트. 프론트 tsc/vitest 전수(23/23) — `booking-form.test.tsx` 문구 단언을 티켓 카드 텍스트로 갱신, `demo-dashboard.test.tsx`에 티켓 목록 렌더링 테스트 추가. 실서버 curl — A 계정 가상유저 20명 투입해도 B 계정 이벤트(재고 100/100)는 무영향 확인, 실제 예매→결제 파이프라인을 끝까지 돌려 SSE `tickets` 응답이 프론트 타입과 정확히 일치함을 확인(`{id,quantity,status,paymentStatus,isMine}`).
+  - **⚠️ 미완이었던 것 → 바로 다음 항목에서 실사용 테스트로 해소**: 브라우저 자동화 도구 없이 API 계약 검증으로 대체했던 부분을, 사용자가 직접 화면을 띄워 테스트하며 실제 버그 2건을 찾아줌(아래 항목).
+- **✅ 실사용 1차 테스트 — 재진입 멈춤 버그 수정 + 티켓 목록 좌측 이동 (2026-08-07)**: 위 항목 배포 직후 사용자가 직접 "진입→대기→12개 예매→결제→결제 실패→대기열 재진입" 흐름을 테스트하며 스크린샷과 함께 두 가지 리포트.
+  - **버그**: 결제 실패 후 "다시 예매하기"를 누르면 "대기열 입장 중..."에서 완전히 멈춤. 원인 — 이 버튼(그리고 "다시 시도" 버튼)이 `setState({phase:"idle"})`로만 되돌리는데, 대기열 자동 입장 effect는 `hasStartedRef` 가드로 **마운트당 정확히 한 번만** 실행되게 막혀 있어(StrictMode 이중 마운트 방지용) idle로 돌아가도 재입장이 다시 안 걸림. 이미 정상 동작하던 "허가창 만료 → 다시 대기열 입장" 버튼이 `handleJoinQueue`를 직접 호출하는 패턴이었어서, 나머지 세 버튼(확정/취소/에러 재시도)도 동일하게 통일해 수정.
+  - **레이아웃**: 티켓 목록을 우측 판매현황 패널(`demo-dashboard.tsx`)에서 좌측 "내 예매" 패널(`booking-form.tsx`) 바로 아래로 이동 + 내 티켓을 목록 맨 위에 별도 섹션으로 분리. 두 컴포넌트가 같은 SSE 스냅샷을 나눠 써야 해서 구독 자체를 신규 `use-demo-stats.ts` 훅으로 끌어올려 `events/[id]/page.tsx`가 한 번만 구독하고 props로 내려주는 구조로 변경(중복 커넥션 방지). 신규 `ticket-list.tsx`가 `isMine` 기준으로 "내 티켓"/"다른 참가자 티켓" 두 섹션을 렌더링.
+  - **테스트**: `booking-form.test.tsx`에 "다시 예매하기" 클릭 후 실제 재입장(새 순번 수신) 확인하는 회귀 단언 추가. `demo-dashboard.test.tsx`를 props 전제로 전면 재작성(내부 티켓 렌더링 테스트는 신규 `ticket-list.test.tsx`로 이동). **web 23→26 그린.** tsc·eslint 클린.
+- **✅ 헤더(로그아웃·도움말) + 대기열 안내 팝업 신설 (2026-08-08)**: 사용자가 "헤더 우측에 로그아웃·도움말 추가, 도움말은 제품 설명서 팝업으로" + "이벤트 상세 진입 시 대기열이 의도된 동작이라는 안내도 따로" 요청.
+  - **로그아웃 개념부터 확인**: JWT는 상태 없는(stateless) 토큰이라 서버가 발급 후 무효화할 방법이 없다는 것 — 로그아웃은 "브라우저가 더 이상 토큰을 안 보내게" httpOnly 쿠키를 지우는 것뿐이라는 트레이드오프를 먼저 설명하고, "로그아웃 전 복사된 토큰이 있다면 로그아웃 후에도 유효한가"로 이해 확인.
+  - **백엔드**: `POST /auth/logout`(`res.clearCookie`) 추가, signup/login처럼 `JwtAuthGuard` 없음(로그아웃은 인증 확인이 필요 없는 동작). 신규 `auth.controller.spec.ts`(이 모듈 첫 컨트롤러 단위 테스트). **API 84→85 그린.** curl로 쿠키 왕복 실측(로그아웃 후 `/auth/me` 401).
+  - **팝업 2종은 "완전히 별개"로 확정(사용자 확인)**: ① `help-modal.tsx` — 헤더 버튼으로 언제든 여는 목적/사용법/케이스 매뉴얼. ② `queue-notice-modal.tsx` — 이벤트 상세 진입 시 자동으로 한 번만 뜨는 "대기열은 의도된 동작" 안내(`localStorage`로 재방문 시 억제). 공용 `modal.tsx`(배경 클릭·Esc 닫기) + `header.tsx`(우측 버튼 2개) + `events/layout.tsx`(세그먼트 레이아웃으로 `/events`류에만 헤더 적용, 게이트/로그인 화면엔 안 보임).
+  - **린트**: `queue-notice-modal.tsx`의 마운트 시 `localStorage` 조회→`setState`가 `react-hooks/set-state-in-effect`에 걸려, booking-form.tsx에서 썼던 것과 같은 `Promise.resolve().then(...)` 콜백 패턴으로 해결. JSX의 `"..."` 따옴표는 `react/no-unescaped-entities`에 걸려 「 」로 교체.
+  - **테스트**: `header.test.tsx`·`queue-notice-modal.test.tsx` 신규. **web 26→31 그린.** tsc·eslint 클린.
+- **✅ 대기열 안내 팝업 ↔ 실제 대기열 입장 순서 조정 (2026-08-08)**: 위 항목 배포 직후 사용자가 "안내를 읽는 동안 가상유저 대기열이 다 빠진다"고 리포트 — 팝업이 뜨는 것과 동시에 `booking-form.tsx`의 자동 대기열 입장(크라우드 투입+본인 입장) effect도 마운트 시점에 같이 시작돼서, 입장 허가(2초당 20명)가 안내를 읽는 몇 초 사이에 크라우드를 이미 다 처리해버리는 구조였다.
+  - **수정**: `QueueNoticeModal`에 `onAcknowledged` 콜백 추가(이미 본 적 있으면 즉시, 처음이면 "확인" 클릭 시 호출) + `BookingForm`에 `canJoin: boolean` prop 추가 — 자동 입장 effect가 `hasStartedRef` 가드보다 먼저 `canJoin`을 체크해, false인 동안의 실행(StrictMode 이중 실행 포함)은 "시작한 것"으로 안 치고 true로 바뀐 뒤에야 정확히 한 번 시작한다. `events/[id]/page.tsx`가 `canJoin` state로 두 컴포넌트를 이어준다.
+  - **테스트**: `booking-form.test.tsx`에 canJoin 토글 회귀 테스트, `queue-notice-modal.test.tsx`를 `onAcknowledged` 호출 시점 검증으로 갱신. **web 31→32 그린.** tsc·eslint 클린.
+- **✅ 대기열 안내를 이벤트 목록으로 재조정 + 로그인 후 도움말 자동 표시 + ADR 배포 전 점검 (2026-08-08)**: 사용자가 바로 이어서 "이벤트 목록에서 선택 → 안내 확인 → 그제서야 이동" 순서를 요청 — 위 항목의 `canJoin` 게이팅을 상세 페이지에서 걷어내고, `event-list.tsx`의 판매중 카드를 클릭 핸들러로 바꿔 목록 화면에서 `QueueNoticeModal`을 띄운 뒤 확인 시 `router.push`로 이동하도록 재구성. 추가로 "로그인 후 /events 최초 진입 시 도움말 자동 표시"(`auto-help-popup.tsx`, 대기열 안내와는 별도 localStorage 키)를 신규 구현.
+  - **ADR 점검**: 서브에이전트로 `docs/decisions/` 18건을 코드와 대조 — 드리프트 4건(0013 인증: Google SSO·쿠키 전송 미반영, 0011 Infisical: 실제로는 평문 `.env` 운영, 0010 Neon: "W2 예외"가 W2~W4로 확대, 0018: TTL 인용 수치가 PRD 구값 5분)을 각 ADR에 "개정 이력"으로 기록. 0009는 대부분 다른 ADR이 커버해 보류.
+  - **테스트**: `event-list.test.tsx` 전면 재작성(클릭→팝업→이동 흐름), `auto-help-popup.test.tsx` 신규, `booking-form.test.tsx`의 canJoin 테스트 제거. **web 32→36 그린.** tsc·eslint 클린.
+  - **진행 중**: 대기열/예매 가시성 강화 요청에 대해 Artifact로 시각화 옵션 2종(게이지+퍼널 / 레인별 인물 원) 목업을 사용자 검토용으로 제작 — 방향 확정 대기.
+- **✅ 티켓 문구 정정 + ADR 0010 방향 확정 (2026-08-08)**: 실사용 중 "결제 실패(20%)로 CANCELLED된 티켓이 '취소됨'이라 뜨는 게 오해를 준다"는 피드백 — `ticket-card.tsx`의 `statusLabel`만 "결제 실패"로 교체(로직·상태값 무변경), `booking-form.test.tsx`·`help-modal.tsx` 문구도 함께 갱신. ADR 0010은 "개발 중엔 로컬 기본값, 배포 시 Neon 전환"으로 사용자 확인 후 정식 확정(전환 체크리스트 포함).
+- **✅ 판매 현황을 게이지+퍼센티지 막대로 재구성 (2026-08-08, Artifact 목업 옵션 A 확정 적용)**: 사용자가 목업 확인 후 "게이지는 최댓값이 있어야 의미 있다"며 범위 구체화 — 재고(분모=totalQty)·대기중(표시 상한 200)·최종결과(퍼센티지)만 게이지/막대로, 나머지는 숫자 스트립으로.
+  - **백엔드**: `DemoStats.totalQty` 신규(재고 게이지 분모, `streamStats()` 진입 시 1회만 조회).
+  - **프론트**: 스탯 타일 6개 그리드 → `Gauge`(재고/대기중) + `OutcomeBar`(확정/결제실패/만료 퍼센티지, `stats.tickets` 기반) + `DetailStrip`(HELD/PAID/FAILED/재고소진/포기/큐적체, 조용한 한 줄) 3단 재구성. 중복이던 "입장 대기중" 인라인 표시 제거.
+  - **검증**: API 85개 유지(테스트 보강), web 36→39 그린. curl로 SSE `totalQty:100` 실측 확인.
+- **✅ "서버 재실행 후 새로고침하면 events.map is not a function" 버그 수정 (2026-08-08)**: `jest`의 DB 전체삭제 이후에도 브라우저 쿠키가 살아있어 "서명은 유효하지만 실제로는 없는 유저"로 인증이 통과되던 게 근본 원인 — `JwtStrategy.validate()`가 `prisma.user.findUnique`로 존재를 재확인하도록 고쳐 401로 명확히 실패하게 함(ADR 0013 개정). `event-list.tsx`도 `res.ok` 미확인 방어 추가(에러 시 재로그인 링크). 실제 유저 삭제로 재현·검증(500→401). 신규 `jwt.strategy.spec.ts`(2건) + `event-list.test.tsx` 회귀 1건. **API 85→87, web 39→40 그린.**
 
 ## 🔨 진행 중 / 막힌 것
 - (막힌 것 없음.)
@@ -165,6 +227,11 @@
 ## 🖥️ 이 기기(현재) 로컬 환경 — 재세팅 시 주의
 - **Node 버전**: 활성 `node`가 v22.12.0이면 pnpm(v22.13+ 요구)이 거부한다. **nvm의 v22.23.1 사용**: 명령 앞에 `export PATH="$HOME/.nvm/versions/node/v22.23.1/bin:$PATH"` 붙이거나 `nvm use v22.23.1`.
   - **⚠️ 2026-08-06까지는 `nvm` 명령 자체가 이 기기에서 안 됐다**(사용자가 자기 터미널에서 `zsh: command not found: nvm` 리포트) — `~/.nvm/nvm.sh`(node 버전 관리 스크립트)는 있었지만 `~/.zshrc`가 그걸 로드(source)하는 코드가 없었던 것. `~/.zshrc`의 `# NVM` 주석 아래에 `NVM_DIR` export + `nvm.sh` source 3줄을 추가해 해결 — **사용자의 새 대화형 터미널에서는 이제 `nvm` 명령이 정상 동작**한다. 단, 이 코드 에이전트(Claude Code) 세션의 Bash 도구는 비대화형이라 `.zshrc`를 안 읽으므로, 에이전트 안에서는 여전히 위 `export PATH=...` 방식을 써야 한다(사람이 직접 여는 터미널과는 별개 상황).
+  - **✅ 2026-08-07 — 매번 `nvm use` 안 쳐도 되게 완전 해결**: `nvm alias default v22.23.1`만으론 새 셸에 자동 적용 안 됨을 실측 확인(새 셸 열어도 여전히 v22.12.0) — `~/.zshrc` **맨 끝**에 `nvm use default --silent`를 추가해서야 확실히 적용됨(파일 중간에 넣었더니 그 아래 있던 하드코딩된 PATH 줄이 다시 덮어써서 소용없었다 — 반드시 모든 PATH 조작 이후, 파일 맨 끝에 둬야 함). 이제 **새 터미널(IDE 통합 터미널 포함)을 열면 자동으로 v22.23.1**이 잡히고 `nvm use`/`export PATH=...` 둘 다 필요 없다. 프로젝트 루트 `.nvmrc`(값 `22.23.1`)도 이미 커밋돼 있어 다른 기기에서 재현 가능.
+- **루트 `package.json`에 편의 스크립트 4개 추가(2026-08-07)** — `docker compose`가 pnpm 워크스페이스와 무관한 별도 도구라 `cd infra`가 필요했던 걸 완화:
+  - `pnpm docker:up` = `docker compose -f infra/docker-compose.yml up -d --wait postgres redis`
+  - `pnpm docker:down` = `docker compose -f infra/docker-compose.yml down` (컨테이너만 삭제, `infra/data/`에 bind mount된 실제 데이터는 안전)
+  - `pnpm dev:api` = `pnpm --filter @sunchak/api start:dev`, `pnpm dev:web` = `pnpm --filter @sunchak/web dev`
 - **`.env`는 gitignore라 기기마다 새로 만든다**(이 기기엔 없어서 재생성함). 로컬 W2/W3용 값: `DATABASE_URL=postgresql://sunchak:sunchak@localhost:5432/sunchak?schema=public`, `REDIS_URL=redis://localhost:6379`, `JWT_SECRET`(로컬 임의값), `PORT=3001`. (docker-compose 계정과 일치.)
 - **⚠️ Google SSO는 이 기기의 Google Cloud Console에서 발급한 `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET`이 `.env`에 있어야 실제 로그인이 된다** — 미설정이어도 서버는 정상 기동하지만 `/auth/google` 시도 시 Google이 거부한다. **다른 기기에서 쓰려면**: 같은 Google Cloud 프로젝트의 OAuth 클라이언트에 그 기기의 콜백 URL(`http://localhost:3001/auth/google/callback`은 보통 기기 무관하게 동일)이 승인된 리디렉션 URI로 등록돼 있는지 확인 + Infisical에 값 동기화(ADR 0011, 아직 안 했으면 이 세션에서 수동으로 넣어야 함).
 - **인프라 기동**: `cd infra && docker compose up -d --wait postgres redis`.
@@ -173,8 +240,8 @@
 - **이 기기 `.env`에 `DEMO_GATE_PASSWORD="sunchak-demo"` 추가함(2026-08-06)** — 프론트 게이트 화면을 테스트하려면 필요(미설정 시 게이트 자동 비활성화). 값은 비밀이 아니라 원하면 바꿔도 무방.
 
 ## 🧪 테스트 실행법
-- `cd apps/api && pnpm exec jest`(전체 76개) 또는 `pnpm exec jest reservations`(held+SSE+sweep+reconcile+컨트롤러+결제 통합 26개) · `pnpm exec jest demo`(리셋+게이트+시뮬레이션+stats 23개) · `pnpm exec jest auth`(회원가입/로그인/Google SSO 9개) · `pnpm exec jest queue`(대기열 admission+purge+size 14개, ADR 0017). 사전조건: 로컬 PG·Redis 기동.
-- `cd apps/web && pnpm test`(전체 20개, Vitest). ⚠️ 이 세션 bash 환경에 `NODE_ENV=production`이 섞여들면 `React.act is not a function`으로 전부 깨진다(코드 문제 아님) — `NODE_ENV=test pnpm test`로 덮어써서 실행.
+- `cd apps/api && pnpm exec jest`(전체 87개 — `jwt.strategy.spec.ts`·`auth.controller.spec.ts`(로그아웃) + `events.service.spec.ts`(`findOrCreateOwnDemoEvent`/`findAll`) 신규). 사전조건: 로컬 PG·Redis 기동.
+- `cd apps/web && pnpm test`(전체 40개, Vitest — `header.test.tsx`·`queue-notice-modal.test.tsx`·`ticket-list.test.tsx`·`auto-help-popup.test.tsx` 신규, `demo-dashboard.test.tsx`는 게이지/퍼센티지 막대 전제로 재작성, `event-list.test.tsx`는 클릭→팝업→이동 흐름으로 재작성). ⚠️ 이 세션 bash 환경에 `NODE_ENV=production`이 섞여들면 `React.act is not a function`으로 전부 깨진다(코드 문제 아님) — `NODE_ENV=test pnpm test`로 덮어써서 실행.
 - **테스트 후 데모 이벤트가 지워진다**(위 참고) — 브라우저로 다시 보려면 `pnpm exec prisma db seed` + `POST /demo/reset` 필요.
 - ⚠️ 실DB를 쓰는 통합 스펙 파일이 여러 개(reservations/sweep/reconcile/demo)라 **`maxWorkers: 1`(package.json jest 설정)로 직렬 실행** — 병렬 실행 시 서로의 `beforeEach` 전체삭제가 충돌한다(2.5에서 발견).
 - ⚠️ **`jest`는 로컬 DB의 이벤트·예매·유저를 전부 지운다**(여러 스펙 파일의 `beforeEach`가 격리를 위해 `deleteMany()`함 — 별도 테스트 DB가 아니라 개발 DB를 공유). 테스트 실행 후 브라우저로 데모를 다시 보려면 `pnpm exec prisma db seed` + `POST /demo/reset`으로 재시드해야 한다(2026-08-06 확인).
@@ -187,7 +254,7 @@
 1. `git pull`
 2. 이 파일 읽기 → "다음 할 일"부터.
 3. **의존성 설치는 이제 루트에서 한 번**(2026-08-05 pnpm 워크스페이스 도입): `pnpm install`(루트, `apps/api`+`apps/web` 전부 설치됨). `cd apps/api && pnpm install` 처럼 하위에서 개별 설치하지 않는다.
-4. **로컬 PG + Redis 기동**: `cd infra && docker compose up -d --wait postgres redis`.
+4. **로컬 PG + Redis 기동**: 루트에서 `pnpm docker:up`(내부적으로 `docker compose -f infra/docker-compose.yml up -d --wait postgres redis`와 동일 — Docker Desktop 앱이 먼저 떠 있어야 함).
 5. `.env` 확인/생성(위 "이 기기 로컬 환경" 참고, `apps/api/.env`) → `cd apps/api && pnpm exec prisma migrate deploy && pnpm exec prisma generate`.
-6. 백엔드: `cd apps/api && pnpm start:dev`(또는 루트에서 `pnpm --filter @sunchak/api start:dev`). 프론트: `pnpm --filter @sunchak/web dev`. 테스트: `cd apps/api && pnpm exec jest`.
+6. 백엔드: 루트에서 `pnpm dev:api`(또는 `cd apps/api && pnpm start:dev`). 프론트: 루트에서 `pnpm dev:web`. 테스트: `cd apps/api && pnpm exec jest`. 컨테이너 정리: `pnpm docker:down`(데이터는 `infra/data/`에 남아 안전).
 7. 더 깊은 맥락: `docs/DEVLOG.md` → `docs/decisions/` → `git log`.
