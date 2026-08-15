@@ -54,6 +54,20 @@ export class AuthController {
     return user;
   }
 
+  // POST /auth/logout → JWT는 상태 없는(stateless) 토큰이라 서버가 "무효화"할
+  // 방법이 없다(블랙리스트를 따로 두지 않는 한, 이 프로젝트엔 없음). 그래서
+  // 로그아웃은 "브라우저가 더 이상 이 토큰을 안 보내게" 쿠키만 지우는 것으로
+  // 구현한다 — httpOnly라 프론트 JS(document.cookie)가 못 지우므로 서버가
+  // 대신 만료된 쿠키로 덮어써야 한다. 로그인/회원가입과 마찬가지로 JwtAuthGuard는
+  // 안 걸어둔다(로그아웃은 "지금 내가 누구인지"를 확인할 필요가 없는, 항상
+  // 허용돼야 하는 동작 — 이미 만료된 토큰으로도 눌러야 하니까).
+  @HttpCode(HttpStatus.OK)
+  @Post('logout')
+  logout(@Res({ passthrough: true }) res: Response) {
+    res.clearCookie(ACCESS_TOKEN_COOKIE, authCookieOptions());
+    return { loggedOut: true };
+  }
+
   // GET /auth/google → 브라우저를 Google 로그인 페이지로 리다이렉트한다.
   // 핸들러 본문은 실행되지 않는다(가드가 리다이렉트 응답을 먼저 보냄).
   // @Public(): 브라우저의 페이지 이동은 커스텀 헤더(X-Demo-Token)를 못 붙이므로
