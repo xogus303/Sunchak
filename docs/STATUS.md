@@ -5,7 +5,7 @@
 > - **세션 시작 시**: 이 파일을 가장 먼저 읽고 "다음 할 일"부터 이어간다.
 > - **세션 끝 / 커밋 전**: 이 파일을 **덮어써서** 최신 상태로 갱신한다. (시간순 이력·삽질은 `DEVLOG.md`, 결정 근거는 `decisions/`)
 
-**마지막 업데이트:** 2026-08-08 (**"서버 재실행 후 새로고침하면 events.map is not a function" 버그 수정** — `jest`가 로컬 DB를 통째로 비운 뒤에도 브라우저의 로그인 쿠키(JWT)가 그대로 남아, 서명·만료는 유효하지만 실제로는 없는 유저로 인증이 통과돼 `Event.create({demoOwnerId})`가 FK 위반(500)으로 죽고, 프론트가 그 에러 바디를 배열로 오해해 `.map()`에서 크래시하던 문제. `JwtStrategy.validate()`가 DB로 유저 존재를 한 번 더 확인하도록 고쳐 근본 해결(없으면 401), `event-list.tsx`도 `res.ok` 미확인 문제를 고쳐 에러 시 크래시 대신 "다시 로그인하기" 링크를 보여줌. 실제 유저를 삭제해 시나리오를 재현·검증 완료(수정 전 500 → 수정 후 401). API 87개, web 40개 그린. 오늘 안에 있었던 다른 작업(판매 현황 게이지+퍼센티지 막대 재구성, 티켓 문구 정정, ADR 0010/0013 개정)은 아래 "완료" 목록 참고. 이번 세션 작업은 아직 미커밋. **다음은 ADR 0011 결정(사용자 검토 중) → 배포 6단계**)
+**마지막 업데이트:** 2026-08-20 (**배포 착수 — 인프라 결정(ADR 0019) + VM 발급 + Dockerize 완료** — "배포"는 도메인 미보유·비용 최저 조건 아래 VM 직접 운영(매니지드 무료 호스팅은 BullMQ 상시 워커·Grafana 관측과 구조적으로 안 맞아 기각) + 도메인 없이 무료 매직 도메인(`sslip.io`)으로 서브도메인 공유를 쓰기로 ADR 0019에 확정. VM 공급자는 Oracle Cloud Always Free를 먼저 시도했으나 가입 자체가 반복 실패(신원확인 오류)해 **AWS EC2 프리 티어(t3.micro, Ubuntu, 서울 리전)로 전환**해 발급·SSH 접속까지 확인(리전을 처음에 버지니아로 잘못 만들어 서울로 재생성한 삽질 포함). 이어서 **Dockerize**(로드맵 배포 1단계) 완료 — `apps/api`·`apps/web` 멀티스테이지 Dockerfile을 작성해 로컬 Postgres/Redis에 실제로 붙여서 두 이미지 다 정상 부팅·헬스체크까지 검증(api 520MB, web 198MB standalone). pnpm 모노레포 특유의 삽질 2건 실측 확인·문서화: ① `pnpm prune --prod`를 필터 없이 실행하면 루트 package.json(의존성 0개) 기준으로 판단해 워크스페이스 심볼릭 링크를 지워버림(`--dir apps/api`로 해결) ② prune이 Prisma가 하드링크 폴더에 직접 써넣은 생성 코드(Role enum 등)를 "생성 전" 상태로 리셋시키는 것도 확인 — 우회책이 전부 버전 의존적 임시방편이라 devDependencies를 이미지에 남기는 쪽으로 정확성을 택함. **다음은 CI/CD(GitHub Actions)**)
 
 ---
 
@@ -203,19 +203,27 @@
   - **프론트**: 스탯 타일 6개 그리드 → `Gauge`(재고/대기중) + `OutcomeBar`(확정/결제실패/만료 퍼센티지, `stats.tickets` 기반) + `DetailStrip`(HELD/PAID/FAILED/재고소진/포기/큐적체, 조용한 한 줄) 3단 재구성. 중복이던 "입장 대기중" 인라인 표시 제거.
   - **검증**: API 85개 유지(테스트 보강), web 36→39 그린. curl로 SSE `totalQty:100` 실측 확인.
 - **✅ "서버 재실행 후 새로고침하면 events.map is not a function" 버그 수정 (2026-08-08)**: `jest`의 DB 전체삭제 이후에도 브라우저 쿠키가 살아있어 "서명은 유효하지만 실제로는 없는 유저"로 인증이 통과되던 게 근본 원인 — `JwtStrategy.validate()`가 `prisma.user.findUnique`로 존재를 재확인하도록 고쳐 401로 명확히 실패하게 함(ADR 0013 개정). `event-list.tsx`도 `res.ok` 미확인 방어 추가(에러 시 재로그인 링크). 실제 유저 삭제로 재현·검증(500→401). 신규 `jwt.strategy.spec.ts`(2건) + `event-list.test.tsx` 회귀 1건. **API 85→87, web 39→40 그린.**
+- **✅ 미커밋 작업 8개 기능별 커밋으로 정리 (2026-08-08)**: 48개 파일을 대기열 버그수정/유저별 격리/티켓 UI/헤더+팝업/안내 재조정/게이지 재구성/세션 401/ADR 문서 순으로 8개 커밋(`5084519`~`1942ace`)에 나눠 커밋. 세션 중 여러 기능이 같은 파일을 거쳐간 경우(예: `demo.service.ts`, `event-list.tsx`)는 파일 단위로만 쪼갤 수 있어 최종 내용 기준 가장 비중 큰 커밋에 배정, 커밋 순서마다 tsc가 깨지지 않는지 확인. push는 안 함.
+- **✅ "실시간성·대량 트래픽 체감이 떨어진다" 지적 → ADR 추후 개선 백로그 기록 (2026-08-15)**: 대기열 순번 표시가 실제로는 1초 폴링(결제 확정 SSE는 진짜 이벤트 기반)이라는 비대칭을 코드로 확인. 개선 방향 4가지(순번 이벤트화·ETA 표시는 ADR 0017에, 대용량 트래픽 별도 이벤트+Neon 실사용량 기반 예산 게이트·관측 도입은 ADR 0016에) 기록 — 아직 결정·구현 안 됨.
+- **✅ 배포 인프라 결정(ADR 0019) + AWS VM 발급 + Dockerize 완료 (2026-08-19~20)**: 도메인 미보유·비용 최저 조건에서 VM 직접 운영(매니지드 무료 호스팅은 BullMQ 상시 워커·Grafana 관측과 구조적으로 안 맞음) + 무료 매직 도메인(`sslip.io`)으로 서브도메인 공유 방식을 ADR 0019로 확정.
+  - **VM 공급자 삽질**: Oracle Cloud Always Free를 먼저 시도했으나 가입이 반복 실패(신원확인 오류, 재시도해도 동일) → **AWS EC2 프리 티어(t3.micro, Ubuntu, 서울 리전)로 전환**. 리전을 처음엔 기본값(버지니아)으로 잘못 만들어 서울로 재생성(AMI·키 페어·보안 그룹은 리전마다 별개라는 점 확인). SSH 접속 확인 완료 — 아래 "배포 VM 정보" 참고.
+  - **Dockerize**: `apps/api`·`apps/web` 멀티스테이지 Dockerfile 신규 작성(`apps/api/Dockerfile`, `apps/web/Dockerfile`, 루트 `.dockerignore`). `apps/web/next.config.ts`에 `output:'standalone'` + `outputFileTracingRoot`(모노레포 대응) 추가. 로컬 Postgres/Redis(`host.docker.internal`)에 실제로 붙여서 두 이미지 다 전체 부팅+헬스체크까지 검증(api 520MB, web 198MB).
+  - **삽질 2건(pnpm 모노레포 + Docker)**: ① `pnpm prune --prod`를 필터 없이 실행하면 루트 `package.json`(의존성 0개) 기준으로 판단해 워크스페이스 심볼릭 링크를 지워버림 → `pnpm prune`은 `--filter` 미지원, `--dir apps/api`로 스코프 지정해 해결. ② 스코프를 고쳐도 prune이 pnpm 하드링크 스토어를 건드리면서 Prisma가 직접 써넣은 생성 코드(`Role` enum 등)를 "생성 전" 상태로 리셋시키는 것도 실측 확인 — 우회책(해시 경로 하드코딩, `pnpm dlx` 재생성)이 전부 버전 의존적 임시방편이라 **devDependencies를 이미지에 남기는 쪽으로 정확성을 택함**(VM 디스크 30GB 여유 있어 수용 가능한 트레이드오프로 판단).
+  - **다음은 CI/CD(GitHub Actions)** — 아래 "다음 할 일" 2번 참고.
 
 ## 🔨 진행 중 / 막힌 것
 - (막힌 것 없음.)
+- **ADR 0017/0016의 "추후 개선 백로그"(2026-08-15) 중 무엇부터 실제로 붙일지 미정** — 배포(§2) 이후에 다시 확인.
 - 장시간 테스트 시 JWT(1h) 만료 주의 → 재로그인으로 토큰 갱신.
 
 ## ▶️ 다음 할 일 (이 순서로)
 1. ✅ ~~W1~~ / ✅ ~~W2 + ADR 0014~~ / ✅ ~~W3 전체(설계+2.2~2.5) + ADR 0015~~ / ✅ ~~W4 데이터 리셋+seed~~ / ✅ ~~W4 진입 게이트~~ / ✅ ~~Google SSO~~ / ✅ ~~W4 서버측 부하 시뮬레이션(축 B-1)~~ / ✅ ~~W4 실시간 stats 대시보드(축 B-2)~~ / ✅ ~~W4 프론트 워크스페이스+쿠키 인증 전환~~ / ✅ ~~W4 프론트 실제 화면(게이트→로그인→대시보드)~~ / ✅ ~~Vitest+RTL 도입~~ / ✅ ~~"내 예매"(실제 티케팅) 기능~~ / ✅ ~~선착순 입장 대기열(ADR 0017)~~ / ✅ ~~모의 결제(ADR 0018)~~ / ✅ ~~이벤트 목록/상세 + 판매 현황 통합~~ — **PRD 갭 전부 처리 완료.**
-2. **"배포"는 사실 6개 조각 — `01_기술_로드맵.md` Week 4 기준으로 하나도 안 된 상태 (2026-08-06 점검)**. 순서대로:
-   1. **Dockerize** — 멀티스테이지 빌드(`apps/api`, `apps/web`). 지금 리포에 `Dockerfile`이 하나도 없음.
-   2. **CI/CD(GitHub Actions)** — lint/test → 이미지 빌드 → GHCR push → VM pull&재기동. `.github/workflows` 없음.
-   3. **VM 배포 + Nginx 리버스 프록시** — Neon은 이미 있음(ADR 0010). VM은 미착수.
-      - **도메인 정렬 검토**: ① 서브도메인 공유(`app.`/`api.` + 쿠키 `Domain=.도메인`)로 `SameSite=Lax` 유지, ② 리버스 프록시로 완전 동일 오리진화(`/api/*` 프록시). 실제 배포처(도메인 보유 여부) 확정되면 둘 중 선택.
-      - 배포 시 `GOOGLE_CALLBACK_URL`·`WEB_APP_URL`을 실제 도메인으로, Google Cloud Console의 승인된 리디렉션 URI도 함께 갱신 필요. 다른 도메인이면 쿠키 `SameSite=None`+`Secure`(HTTPS) 강제 — `common/auth-cookie.ts`의 `NODE_ENV` 분기 확인.
+2. **"배포" 6개 조각 (`01_기술_로드맵.md` Week 4 기준, ADR 0019로 인프라 결정)**. 순서대로:
+   1. ✅ ~~**Dockerize**~~ — `apps/api`/`apps/web` 멀티스테이지 빌드, 로컬 검증 완료(2026-08-20).
+   2. **← 다음: CI/CD(GitHub Actions)** — lint/test → 이미지 빌드 → GHCR push → VM pull&재기동. `.github/workflows` 없음.
+   3. **VM 배포 + Nginx 리버스 프록시** — 진행 중. AWS 서울 리전 t3.micro는 발급·SSH 확인 완료(아래 "배포 VM 정보"), **Docker·Nginx·Let's Encrypt 설치는 아직 안 함**. Neon은 이미 있음(ADR 0010).
+      - **도메인: ADR 0019로 확정** — `sslip.io` 무료 매직 도메인으로 서브도메인 공유(`app.<IP>.sslip.io` / `api.<IP>.sslip.io`), `SameSite=Lax` 유지.
+      - 배포 시 `GOOGLE_CALLBACK_URL`·`WEB_APP_URL`을 매직 도메인으로, Google Cloud Console의 승인된 리디렉션 URI도 함께 갱신 필요.
    4. **관측(Prometheus+Grafana)** — 요청률/p95/에러율/큐 적체 대시보드. 미착수.
    5. **최종 k6 부하 리포트** — `apps/api/test/load/`엔 W2 락 비교용 스크립트만 있음(그건 §8 "before/after" 문서로 이미 남김, `docs/perf/`). 전체 파이프라인(HELD+큐+SSE) 완성 후의 최종 부하 리포트는 별도로 아직 없음.
    6. **README + 회고(트러블슈팅 기록)** — 미작성.
@@ -223,6 +231,16 @@
    - (여유 있으면 스트레치, 필수 아님) 분산 락(Redlock)·read replica·Terraform·K8s.
 3. (선택) `simulateLoad()`가 쿨다운을 데모 이벤트 확인보다 먼저 거는 순서 정리(위 축 B-1/B-2 "발견(보류)" 참고).
 4. (선택, 프로젝트 완성 후) **npm 패키지 보안 검토 자동화 도입** — 비용 0원. GitHub Dependabot 활성화(리포 Settings) + CI(GitHub Actions)에 `pnpm audit` 스텝 추가 + Socket.dev 무료 GitHub App 연결(행위 기반 탐지, PR마다 자동 실행). **커버 범위가 npq보다 넓어서 선택**: npq는 설치 순간 1회 스냅샷만 보는 반면, 이 조합은 이미 설치된 의존성 전체를 생애주기 내내 계속 재검사함(설치 후 새로 등록되는 CVE까지 커버). 2026-08-06 대화에서 조사·확정.
+
+## 🚀 배포 VM 정보 (AWS EC2, 2026-08-19 발급)
+- **리전**: 아시아 태평양(서울) `ap-northeast-2`. (처음 버지니아로 잘못 만들었다가 재생성 — 리전 간 인스턴스 이동 불가, AMI·키 페어·보안 그룹 전부 리전별 별개라는 점 확인함.)
+- **퍼블릭 IPv4**: `15.164.234.208` (인스턴스 재시작 시 바뀔 수 있음 — 나중에 Elastic IP로 고정 고려. 지금은 재부팅만 안 하면 유지됨)
+- **AMI**: Ubuntu Server (t3.micro, 프리 티어) — 접속 계정은 `ec2-user`가 아니라 **`ubuntu`**
+- **키 페어**: `sunchak-key` — **`.pem` 파일은 gitignore 대상이라 git에 없음. 다른 기기에서 접속하려면 AWS 콘솔에서 새 키 페어를 발급해 기존 인스턴스에 연결하거나(재부팅 필요), 이 기기의 `.pem` 파일을 안전한 방법으로 직접 옮겨야 함.**
+- **접속**: `ssh -i <키경로>/sunchak-key.pem ubuntu@15.164.234.208`
+- **보안 그룹**: SSH(22, 내 IP)·HTTP(80, Anywhere-IPv4)·HTTPS(443, Anywhere-IPv4) 인바운드 허용됨.
+- **현재 상태**: SSH 접속만 확인됨. Docker·Nginx·Let's Encrypt·앱 배포는 전부 아직 미착수(다음 세션에서 진행).
+- **AWS 프리 티어**: 12개월 한시(Oracle/GCP의 "영구 무료"와 다름) — 만료일은 콘솔 우측 상단 계정명 → "계정" → 계정 생성일 + 12개월로 계산.
 
 ## 🖥️ 이 기기(현재) 로컬 환경 — 재세팅 시 주의
 - **Node 버전**: 활성 `node`가 v22.12.0이면 pnpm(v22.13+ 요구)이 거부한다. **nvm의 v22.23.1 사용**: 명령 앞에 `export PATH="$HOME/.nvm/versions/node/v22.23.1/bin:$PATH"` 붙이거나 `nvm use v22.23.1`.
