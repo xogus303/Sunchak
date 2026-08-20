@@ -1,0 +1,46 @@
+# 지금은 이미지 빌드 + GHCR push까지만 한다. VM에 Docker/Nginx가 아직 없어서
+# "SSH로 접속해 pull&재기동" 단계(deploy job)는 다음 작업(VM 배포+Nginx)에서
+# VM 쪽 구조(compose 파일 위치, 컨테이너 구성)가 정해지면 이 파일에 추가한다.
+# 그 전까지는 사람이 직접 push된 이미지를 확인하는 용도.
+name: CD
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: GHCR 로그인
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: api 이미지 빌드 & push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/api/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/sunchak-api:latest
+            ghcr.io/${{ github.repository_owner }}/sunchak-api:${{ github.sha }}
+
+      - name: web 이미지 빌드 & push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/web/Dockerfile
+          push: true
+          build-args: |
+            NEXT_PUBLIC_API_URL=${{ vars.NEXT_PUBLIC_API_URL }}
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/sunchak-web:latest
+            ghcr.io/${{ github.repository_owner }}/sunchak-web:${{ github.sha }}

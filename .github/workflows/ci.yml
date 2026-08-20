@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  api-test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: sunchak
+          POSTGRES_PASSWORD: sunchak
+          POSTGRES_DB: sunchak
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sunchak"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://sunchak:sunchak@localhost:5432/sunchak?schema=public
+      REDIS_URL: redis://localhost:6379
+      JWT_SECRET: ci-test-secret
+      JWT_EXPIRES_IN: 1h
+      WEB_APP_URL: http://localhost:3000
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm --filter @sunchak/api exec prisma generate
+      - run: pnpm --filter @sunchak/api exec prisma migrate deploy
+      - run: pnpm --filter @sunchak/api run build
+      - run: pnpm --filter @sunchak/api test
+
+  web-check:
+    runs-on: ubuntu-latest
+    env:
+      NEXT_PUBLIC_API_URL: http://localhost:3001
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm --filter @sunchak/web run lint
+      # NODE_ENV=production이 섞이면 React.act 관련 오류로 vitest가 깨진다(STATUS.md 기록) — 명시적으로 test 고정.
+      - run: NODE_ENV=test pnpm --filter @sunchak/web test
+      - run: pnpm --filter @sunchak/web run build
