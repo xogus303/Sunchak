@@ -1,0 +1,39 @@
+# VM에서 실제로 띄우는 프로덕션 구성. 로컬 개발용(docker-compose.yml)과 달리
+# Postgres는 없다 — DB는 Neon(클라우드, ADR 0010)을 쓰고 여긴 api/web/redis만 올린다.
+# 비밀값은 이 파일에 안 쓰고 api.env(VM에만 존재, git에 안 올림)로 분리한다.
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: sunchak-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    networks: [sunchak]
+
+  api:
+    image: ghcr.io/xogus303/sunchak-api:latest
+    container_name: sunchak-api
+    restart: unless-stopped
+    env_file: ./api.env
+    depends_on: [redis]
+    # Nginx가 리버스 프록시로 붙을 것이므로 외부(0.0.0.0)가 아니라 이 VM
+    # 안에서만(127.0.0.1) 접근되게 바인딩한다.
+    ports:
+      - "127.0.0.1:3001:3001"
+    networks: [sunchak]
+
+  web:
+    image: ghcr.io/xogus303/sunchak-web:latest
+    container_name: sunchak-web
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
+    networks: [sunchak]
+
+networks:
+  sunchak:
+    driver: bridge
+
+volumes:
+  redis-data:

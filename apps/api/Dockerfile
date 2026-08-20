@@ -31,4 +31,7 @@ COPY --from=build --chown=node:node /app/apps/api/package.json ./apps/api/packag
 WORKDIR /app/apps/api
 USER node
 EXPOSE 3001
-CMD ["node", "dist/main.js"]
+# migrate deploy는 밀린 마이그레이션이 없으면 아무 일도 안 하는 멱등 명령이라
+# 컨테이너가 뜰 때마다 먼저 돌려도 안전하다 — VM 재배포(pull&재기동)마다
+# 이 컨테이너 하나로 "DB 스키마 최신화 + 서버 기동"이 함께 끝난다.
+CMD ["sh", "-c", "node_modules/.bin/prisma migrate deploy && node dist/main.js"]

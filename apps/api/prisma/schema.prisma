@@ -7,8 +7,12 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  // Neon의 pooled 연결(pgbouncer)은 마이그레이션의 스키마 락 동작과 안 맞아
+  // Neon 공식 가이드가 마이그레이션엔 direct 연결을 쓰라고 명시한다. 로컬
+  // Postgres는 애초에 풀러가 없어 두 값을 그냥 같게 두면 된다(.env.example 참고).
+  directUrl = env("DIRECT_URL")
 }
 
 // ─────────────────────────────────────────────

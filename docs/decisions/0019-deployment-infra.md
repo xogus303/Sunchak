@@ -32,3 +32,7 @@
 - 쿠키 설정(`common/auth-cookie.ts`)은 기존 `NODE_ENV` 분기를 그대로 사용하되, `Domain` 속성을 `.{IP}.sslip.io`로 지정해야 한다.
 - Google OAuth 콜백 URL(`GOOGLE_CALLBACK_URL`)과 `WEB_APP_URL`을 실제 매직 도메인으로 교체해야 한다(Google Cloud Console의 승인된 리디렉션 URI도 함께 갱신).
 - IP가 바뀌면(VM 재생성 등) 매직 도메인도 함께 바뀐다 — 향후 실제 도메인을 구매하면 이 ADR을 Superseded로 표시하고 전환한다.
+
+## 개정 이력
+
+- **2026-08-21**: 위 "결정"·"결과" 절에 적힌 "쿠키 `Domain` 속성을 `.{IP}.sslip.io`로 지정해야 한다"는 계획이 틀렸음을 실제 배포 작업 중 발견해 정정한다. `Domain` 속성은 "이 쿠키를 어떤 호스트들에도 같이 보낼지"를 정하는 것인데, 이 프로젝트의 인증 쿠키는 `api.<IP>.sslip.io` 한 곳으로만 오가고(`app.<IP>.sslip.io`는 httpOnly라 읽지도 않고 이 쿠키를 실어 보낼 일도 없음) `Domain`을 안 정해도 기본값(발급 호스트에만 전송)이 이미 원하는 동작이다. 실제로 서브도메인 간 쿠키 전송을 담당하는 건 `common/auth-cookie.ts`에 이미 있던 `sameSite: isProd ? 'none' : 'lax'`이며, 이건 `Domain`과 무관한 별개 메커니즘이다. **코드 변경 없음** — 계획 자체가 오류였다.

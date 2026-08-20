@@ -662,3 +662,14 @@
 - **수정**: score를 `Date.now()` 대신 Redis `INCR`로 채번한 단조 증가 정수로 교체(`queue.service.ts`). Redis가 싱글 스레드라 `INCR`은 동시에 여러 `join()`이 들어와도 절대 같은 값을 두 번 못 주므로, 동점 자체가 구조적으로 불가능해진다.
 - **검증**: `queue.service.spec.ts` 11/11, 전체 API 87/87 로컬 재실행 통과(회귀 없음).
 - **다음**: `cd.yml` 수동 실행으로 GHCR push 확인 → VM 배포+Nginx(3번)로 진행.
+
+## 2026-08-21 · VM Docker 설치 + 프로덕션 compose 준비 + ADR 0019 정정(쿠키 Domain 불필요) + Neon direct 연결 버그 발견·수정
+
+- **CI/CD 검증 완료**: `ci.yml` 재실행 그린(api-test 1m2s·web-check 49s, web 40/40), `cd.yml` 수동 실행으로 GHCR에 이미지 2개 push + 패키지 Public 전환 완료. 배포 6단계 중 2번(CI/CD) 마무리.
+- **3번(VM 배포+Nginx) 착수 — 1·2단계**: VM에 Docker Engine을 공식 설치 스크립트(`get.docker.com`)로 설치, `ubuntu` 유저를 `docker` 그룹에 추가(새 SSH 세션부터 적용 — 그룹 변경은 로그인 시점에 반영된다는 걸 재확인). GHCR 이미지 2개를 VM에서 직접 `docker pull`해 공개 전환이 실제로 작동하는지 확인.
+- **ADR 0019 정정 — 쿠키 `Domain` 속성은 불필요함을 발견**: ADR 0019가 "배포 시 쿠키 `Domain`을 `.{IP}.sslip.io`로 지정해야 한다"고 적어뒀는데, `common/auth-cookie.ts`를 다시 보니 이 계획 자체가 틀렸다 — 인증 쿠키는 `api.<IP>.sslip.io` 한 곳으로만 오가서(`app.*`는 httpOnly라 읽지도 않음) `Domain` 기본값(발급 호스트에만 전송)이 이미 원하는 동작이고, 서브도메인 간 쿠키 전송은 이미 있던 `sameSite: isProd ? 'none' : 'lax'`가 담당하는 별개 메커니즘이다. **코드 변경 없이** ADR 0019에 개정 이력으로 정정만 기록. (Safari의 서드파티 쿠키 차단이 `SameSite=None`이어도 막을 수 있다는 잠재 리스크는 실제 e2e 검증 때 확인하기로 보류.)
+- **Neon pooled/direct 연결 분리 필요 발견**: 프로덕션 compose에서 api 컨테이너가 뜰 때마다 `prisma migrate deploy`를 실행하도록 Dockerfile CMD를 바꾸려던 참에, Neon 공식 문서(WebFetch로 확인)가 "마이그레이션은 pooled 연결(pgbouncer)이 아니라 direct 연결을 써야 한다"고 명시하는 걸 확인. `schema.prisma`에 `directUrl = env("DIRECT_URL")` 추가, `apps/api/.env.example`·이 기기 로컬 `.env`·`ci.yml`에 `DIRECT_URL` 반영(로컬 Postgres는 풀러가 없어 `DATABASE_URL`과 같은 값). 로컬 `prisma generate`/`migrate deploy`/전체 jest(87/87) 재검증 통과.
+- **`apps/api/Dockerfile` CMD 변경**: `node dist/main.js` 단독 실행에서 `prisma migrate deploy && node dist/main.js`로 — 밀린 마이그레이션이 없으면 아무 일도 안 하는 멱등 명령이라 컨테이너가 뜰 때마다(=VM 재배포마다) 먼저 돌려도 안전하다. 런타임 이미지가 devDependencies(prisma CLI 포함)를 그대로 갖고 있어(2026-08-19~20 Dockerize 때의 판단) 별도 설치 없이 바로 됨.
+- **`infra/docker-compose.prod.yml` 신규 작성**: api·web·redis 3개 컨테이너(Postgres는 없음 — Neon 클라우드). api/web은 `127.0.0.1`에만 바인딩(외부 노출은 Nginx가 대신 함), 비밀값은 파일에 안 쓰고 `env_file: ./api.env`(VM에만 존재, git 미포함)로 분리.
+- **`api.env`를 VM에 직접 생성**(비밀값이라 대화창엔 안 올림) — 사용자가 nano로 작성하다가 저장 위치가 `~/sunchak/api.env`가 아니라 `~/api.env`로 어긋난 걸 발견, SSH로 직접 확인(키 이름만 grep, 값은 안 봄) 후 올바른 위치로 이동 + 예전 삽질로 남은 `api.env.save`(nano 비정상 종료 시 자동 생성되는 복구 파일) 삭제 + 권한 600으로 제한.
+- **다음**: 변경사항(schema.prisma·Dockerfile·ci.yml 등) 커밋+push → `cd.yml` 재실행으로 새 이미지 반영 → VM에서 `docker-compose.prod.yml` 기동 → Nginx 리버스 프록시 + Let's Encrypt.

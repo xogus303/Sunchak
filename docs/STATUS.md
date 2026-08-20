@@ -5,7 +5,7 @@
 > - **세션 시작 시**: 이 파일을 가장 먼저 읽고 "다음 할 일"부터 이어간다.
 > - **세션 끝 / 커밋 전**: 이 파일을 **덮어써서** 최신 상태로 갱신한다. (시간순 이력·삽질은 `DEVLOG.md`, 결정 근거는 `decisions/`)
 
-**마지막 업데이트:** 2026-08-20 (**배포 착수 — 인프라 결정(ADR 0019) + VM 발급 + Dockerize 완료** — "배포"는 도메인 미보유·비용 최저 조건 아래 VM 직접 운영(매니지드 무료 호스팅은 BullMQ 상시 워커·Grafana 관측과 구조적으로 안 맞아 기각) + 도메인 없이 무료 매직 도메인(`sslip.io`)으로 서브도메인 공유를 쓰기로 ADR 0019에 확정. VM 공급자는 Oracle Cloud Always Free를 먼저 시도했으나 가입 자체가 반복 실패(신원확인 오류)해 **AWS EC2 프리 티어(t3.micro, Ubuntu, 서울 리전)로 전환**해 발급·SSH 접속까지 확인(리전을 처음에 버지니아로 잘못 만들어 서울로 재생성한 삽질 포함). 이어서 **Dockerize**(로드맵 배포 1단계) 완료 — `apps/api`·`apps/web` 멀티스테이지 Dockerfile을 작성해 로컬 Postgres/Redis에 실제로 붙여서 두 이미지 다 정상 부팅·헬스체크까지 검증(api 520MB, web 198MB standalone). pnpm 모노레포 특유의 삽질 2건 실측 확인·문서화: ① `pnpm prune --prod`를 필터 없이 실행하면 루트 package.json(의존성 0개) 기준으로 판단해 워크스페이스 심볼릭 링크를 지워버림(`--dir apps/api`로 해결) ② prune이 Prisma가 하드링크 폴더에 직접 써넣은 생성 코드(Role enum 등)를 "생성 전" 상태로 리셋시키는 것도 확인 — 우회책이 전부 버전 의존적 임시방편이라 devDependencies를 이미지에 남기는 쪽으로 정확성을 택함. **다음은 CI/CD(GitHub Actions)**)
+**마지막 업데이트:** 2026-08-21 (**배포 2단계 — CI/CD(GitHub Actions) 구축 완료 + 실사용 중 대기열 순번 버그 발견·수정** — `.github/workflows/ci.yml`(push/PR마다 api는 postgres/redis 서비스 컨테이너로 jest까지, web은 lint+vitest+build) · `cd.yml`(수동 트리거로 GHCR에 이미지 push, VM 배포 job은 3번 작업 후 추가 예정) 신규 작성 + 실행 검증 완료(Actions 탭에서 둘 다 그린, GHCR 패키지 2개 공개 전환 확인). 그 과정에서 `ci.yml` 첫 실행이 `queue.service.spec.ts` 1건을 실패시켜 **진짜 버그**를 발견 — 대기열 순번(ZSet score)을 `Date.now()`(밀리초)로 매기다 보니 두 `join()`이 같은 밀리초에 끝나면 동점이 나고 Redis가 동점을 멤버 문자열 사전순으로 정렬해 나중에 온 사람이 먼저 온 사람보다 앞 순번을 받는 문제였음. 로컬은 Redis 왕복 지연 덕에 우연히 안 겹쳤을 뿐, 실제 선착순 트래픽이 몰릴 때도 재현 가능한 공정성 버그로 판단해 Redis `INCR` 기반 단조 증가 시퀀스로 교체(동점 구조적으로 불가능해짐). API 87/87 재검증. **다음은 3. VM 배포 + Nginx**)
 
 ---
 
@@ -210,6 +210,12 @@
   - **Dockerize**: `apps/api`·`apps/web` 멀티스테이지 Dockerfile 신규 작성(`apps/api/Dockerfile`, `apps/web/Dockerfile`, 루트 `.dockerignore`). `apps/web/next.config.ts`에 `output:'standalone'` + `outputFileTracingRoot`(모노레포 대응) 추가. 로컬 Postgres/Redis(`host.docker.internal`)에 실제로 붙여서 두 이미지 다 전체 부팅+헬스체크까지 검증(api 520MB, web 198MB).
   - **삽질 2건(pnpm 모노레포 + Docker)**: ① `pnpm prune --prod`를 필터 없이 실행하면 루트 `package.json`(의존성 0개) 기준으로 판단해 워크스페이스 심볼릭 링크를 지워버림 → `pnpm prune`은 `--filter` 미지원, `--dir apps/api`로 스코프 지정해 해결. ② 스코프를 고쳐도 prune이 pnpm 하드링크 스토어를 건드리면서 Prisma가 직접 써넣은 생성 코드(`Role` enum 등)를 "생성 전" 상태로 리셋시키는 것도 실측 확인 — 우회책(해시 경로 하드코딩, `pnpm dlx` 재생성)이 전부 버전 의존적 임시방편이라 **devDependencies를 이미지에 남기는 쪽으로 정확성을 택함**(VM 디스크 30GB 여유 있어 수용 가능한 트레이드오프로 판단).
   - **다음은 CI/CD(GitHub Actions)** — 아래 "다음 할 일" 2번 참고.
+- **✅ CI/CD(GitHub Actions) 구축 + 실행 검증 완료 (2026-08-21)**: 배포 6단계 중 2번.
+  - **`ci.yml`**: `push`(main)/`pull_request`마다 자동 실행. `api-test` job은 `services:`로 postgres:16-alpine·redis:7-alpine 컨테이너를 띄우고(`infra/docker-compose.yml`과 동일 계정) `prisma generate → migrate deploy → build → jest`. `web-check` job은 `lint → vitest(NODE_ENV=test 명시, "production 섞이면 React.act 깨짐" 기존 삽질 재발 방지) → build`. `pnpm/action-setup`을 `actions/setup-node`(`node-version-file: .nvmrc`, `cache: pnpm`)보다 먼저 둬야 캐시 스텝이 pnpm을 찾는다는 점 확인.
+  - **`cd.yml`**: `workflow_dispatch`(수동)로 api/web Docker 이미지를 빌드해 GHCR(`ghcr.io/xogus303/sunchak-{api,web}`)에 `latest`+커밋 SHA 두 태그로 push. 인증은 별도 PAT 없이 `GITHUB_TOKEN`(job에 `permissions: packages: write`)으로 충분. `NEXT_PUBLIC_API_URL`(web 이미지 빌드 시점에 번들에 박히는 값)은 GitHub **Repository variables**(Environments 아님 — Environment를 안 만들었으므로)에 `https://api.15.164.234.208.sslip.io`로 등록. **VM에 아직 Docker/Nginx가 없어 SSH pull&재기동 job은 이번엔 안 넣고 3번 작업 완료 후 추가하기로 함.**
+  - **사람이 GitHub 웹에서 직접 처리한 것(자동화 불가)**: ① Settings → Secrets and variables → Actions → Variables에 `NEXT_PUBLIC_API_URL` 등록 ② Settings → Actions → General → Workflow permissions를 "Read and write"로 확인 ③ `cd.yml` 첫 실행 후 GHCR 패키지(`sunchak-api`/`sunchak-web`) 가시성을 Public으로 전환.
+  - **⚠️ `ci.yml` 첫 실행에서 실제 버그 발견·수정**: `queue.service.spec.ts`의 "허가 후 재입장하면 새 순번으로 다시 대기한다" 테스트가 로컬에선 늘 통과했는데 GitHub Actions에서만 실패(`rank: 1` 기대 → `rank: 0`). 원인 — `QueueService.join()`이 대기열 순번(ZSet score)을 `Date.now()`(밀리초)로 매기고 있었는데, `services:` 컨테이너 간 Redis 왕복이 로컬보다 훨씬 빨라 두 `join()`이 같은 밀리초 안에 끝나 score가 동점 나고, Redis가 동점을 **멤버 문자열 사전순**("1"<"2")으로 정렬해버려 나중에 온 유저가 먼저 온 유저를 앞질렀다. **CI 환경 특유의 우연이 아니라 실제 선착순 트래픽이 몰릴 때도 재현 가능한 공정성 버그**(이 큐의 존재 이유 자체를 훼손)로 판단 — score를 Redis `INCR` 기반 단조 증가 정수로 교체(`queue.service.ts`). Redis가 싱글 스레드라 `INCR`은 동시에 여러 `join()`이 와도 절대 같은 값을 두 번 못 줘 동점이 구조적으로 불가능해짐.
+  - **검증**: `queue.service.spec.ts` 11/11, API 전체 87/87 로컬 재실행 그린(회귀 없음). `ci.yml` 재실행(Actions 탭 스크린샷 확인) — `api-test`(1m2s)·`web-check`(49s) 둘 다 성공, web 40개 테스트 전부 통과. `cd.yml` 수동 실행 → GHCR에 이미지 2개 push 확인 → Public 전환 완료.
 
 ## 🔨 진행 중 / 막힌 것
 - (막힌 것 없음.)
@@ -220,8 +226,8 @@
 1. ✅ ~~W1~~ / ✅ ~~W2 + ADR 0014~~ / ✅ ~~W3 전체(설계+2.2~2.5) + ADR 0015~~ / ✅ ~~W4 데이터 리셋+seed~~ / ✅ ~~W4 진입 게이트~~ / ✅ ~~Google SSO~~ / ✅ ~~W4 서버측 부하 시뮬레이션(축 B-1)~~ / ✅ ~~W4 실시간 stats 대시보드(축 B-2)~~ / ✅ ~~W4 프론트 워크스페이스+쿠키 인증 전환~~ / ✅ ~~W4 프론트 실제 화면(게이트→로그인→대시보드)~~ / ✅ ~~Vitest+RTL 도입~~ / ✅ ~~"내 예매"(실제 티케팅) 기능~~ / ✅ ~~선착순 입장 대기열(ADR 0017)~~ / ✅ ~~모의 결제(ADR 0018)~~ / ✅ ~~이벤트 목록/상세 + 판매 현황 통합~~ — **PRD 갭 전부 처리 완료.**
 2. **"배포" 6개 조각 (`01_기술_로드맵.md` Week 4 기준, ADR 0019로 인프라 결정)**. 순서대로:
    1. ✅ ~~**Dockerize**~~ — `apps/api`/`apps/web` 멀티스테이지 빌드, 로컬 검증 완료(2026-08-20).
-   2. **← 다음: CI/CD(GitHub Actions)** — lint/test → 이미지 빌드 → GHCR push → VM pull&재기동. `.github/workflows` 없음.
-   3. **VM 배포 + Nginx 리버스 프록시** — 진행 중. AWS 서울 리전 t3.micro는 발급·SSH 확인 완료(아래 "배포 VM 정보"), **Docker·Nginx·Let's Encrypt 설치는 아직 안 함**. Neon은 이미 있음(ADR 0010).
+   2. ✅ ~~**CI/CD(GitHub Actions)**~~ — `ci.yml`(lint/test 자동)·`cd.yml`(수동, 이미지 빌드+GHCR push) 작성·실행 검증 완료(2026-08-21). VM pull&재기동 job은 3번 완료 후 추가.
+   3. **← 다음: VM 배포 + Nginx 리버스 프록시** — AWS 서울 리전 t3.micro는 발급·SSH 확인 완료(아래 "배포 VM 정보"), **Docker·Nginx·Let's Encrypt 설치는 아직 안 함**. Neon은 이미 있음(ADR 0010).
       - **도메인: ADR 0019로 확정** — `sslip.io` 무료 매직 도메인으로 서브도메인 공유(`app.<IP>.sslip.io` / `api.<IP>.sslip.io`), `SameSite=Lax` 유지.
       - 배포 시 `GOOGLE_CALLBACK_URL`·`WEB_APP_URL`을 매직 도메인으로, Google Cloud Console의 승인된 리디렉션 URI도 함께 갱신 필요.
    4. **관측(Prometheus+Grafana)** — 요청률/p95/에러율/큐 적체 대시보드. 미착수.

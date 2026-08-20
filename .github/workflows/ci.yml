@@ -33,6 +33,8 @@ jobs:
           --health-retries 5
     env:
       DATABASE_URL: postgresql://sunchak:sunchak@localhost:5432/sunchak?schema=public
+      # 로컬 Postgres는 풀러가 없어 DATABASE_URL과 동일값(Neon 배포 시엔 pooled/direct 분리 필요).
+      DIRECT_URL: postgresql://sunchak:sunchak@localhost:5432/sunchak?schema=public
       REDIS_URL: redis://localhost:6379
       JWT_SECRET: ci-test-secret
       JWT_EXPIRES_IN: 1h
