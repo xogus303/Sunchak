@@ -47,8 +47,21 @@ export class QueueService {
     return `admitted:event:${eventId}:${userId}`;
   }
 
-  // NX(멤버가 없을 때만 추가) — 중복 클릭이 원래 진입 시각(순번)을 다시 지금으로
+  // ZSet score로 쓸 "진입 순서" 채번 — Redis INCR은 싱글 스레드라 동시에 여러
+  // join()이 들어와도 절대 같은 값을 두 번 못 받는다(원자적 단조 증가).
+  private queueSeqKey(eventId: number): string {
+    return `queue:seq:event:${eventId}`;
+  }
+
+  // NX(멤버가 없을 때만 추가) — 중복 클릭이 원래 진입 순서를 다시 지금으로
   // 밀어버리지 않게 한다.
+  //
+  // ⚠️ score를 Date.now()(밀리초 타임스탬프)로 쓰다가 CI에서 실패로 발견(2026-08-21):
+  // 두 join()이 같은 밀리초 안에 끝나면 score가 동점이 되고, ZSet은 동점을
+  // 멤버 문자열 사전순으로 정렬해버려 "1"이 "2"보다 먼저 왔어도 순번이 뒤집힌다.
+  // 로컬은 Redis 왕복 지연으로 우연히 안 겹쳤을 뿐, 실제 선착순 트래픽이 몰리는
+  // 상황(이 큐가 존재하는 이유 그 자체)에서도 똑같이 터질 수 있는 진짜 공정성
+  // 버그였다. INCR로 채번한 정수를 score로 쓰면 동점 자체가 불가능해진다.
   //
   // ⚠️ 재입장 시 이전 admitted 키를 지운다(2026-08-07 실사용 중 발견) — 안 지우면
   // "허가받고도 아직 TTL(기본 8초)이 안 끝난 채로 대기열을 다시 join"하는 경우
@@ -58,7 +71,8 @@ export class QueueService {
   // 뜻이므로, 과거에 받은 허가는 여기서 확실히 무효화하는 게 맞다.
   async join(eventId: number, userId: number): Promise<void> {
     await this.redis.del(this.admittedKey(eventId, userId));
-    await this.redis.zadd(this.queueKey(eventId), 'NX', Date.now(), String(userId));
+    const seq = await this.redis.incr(this.queueSeqKey(eventId));
+    await this.redis.zadd(this.queueKey(eventId), 'NX', seq, String(userId));
     await this.redis.sadd(ACTIVE_QUEUES_KEY, String(eventId));
   }
 

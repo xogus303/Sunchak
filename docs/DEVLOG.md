@@ -653,3 +653,12 @@
   4. 관측(Prometheus+Grafana) 도입, Neon 예산 잔량까지 대시보드화 — **ADR 0016**
 - 두 ADR 끝에 "추후 개선 백로그 (2026-08-15)" 섹션으로 추가 — 결정된 것도, 구현한 것도 아니라는 걸 명확히 하고 다음 논의 시작점만 남김.
 - **다음**: 배포 6단계. 이 백로그 항목 중 무엇부터 실제로 붙일지는 사용자 확인 후 결정.
+
+## 2026-08-21 · CI/CD(GitHub Actions) 워크플로우 추가 + 대기열 순번 동점 버그 발견·수정
+
+- **배포 6단계 중 2번(CI/CD) 착수**: `.github/workflows/ci.yml`(push/PR마다 api는 postgres/redis 서비스 컨테이너로 jest 통합 테스트까지, web은 lint+vitest+build) · `cd.yml`(수동 트리거로 api/web Docker 이미지를 빌드해 GHCR push)을 신규 작성. VM에 아직 Docker/Nginx가 없어(3번 작업 대기) `cd.yml`엔 실제 배포(SSH pull&재기동) job은 넣지 않고, 다음 작업에서 VM 쪽 구조가 정해지면 추가하기로 함. GHCR 인증은 별도 PAT 없이 `GITHUB_TOKEN`(job에 `packages: write` 권한만 부여)으로 충분하다는 점, `NEXT_PUBLIC_API_URL`은 GitHub Environments가 아니라 저장소 **Repository variables**로 넣어야 `${{ vars.* }}`로 참조된다는 점을 확인.
+- **`ci.yml` 첫 실행에서 `queue.service.spec.ts` 1건 실패 발견**: "허가 후 재입장하면 새 순번으로 다시 대기한다" 테스트가 `rank: 1` 기대했는데 `rank: 0`을 받음. 로컬에선 안 나던 게 GitHub Actions(services 컨테이너라 Redis 왕복이 매우 빠름)에서만 재현됨.
+- **원인**: `QueueService.join()`이 대기열 순번(ZSet score)을 `Date.now()`(밀리초)로 매기고 있었다. 두 `join()`이 같은 밀리초 안에 끝나면 score가 동점이 되고, Redis ZSet은 동점을 **멤버 문자열 사전순**으로 정렬해버려(`"1" < "2"`) 나중에 온 유저가 먼저 온 유저보다 앞 순번을 받아버렸다. 로컬은 Redis 왕복 지연으로 우연히 안 겹쳤을 뿐 — **CI 환경 특유의 우연이 아니라, 선착순 트래픽이 실제로 몰릴 때도 똑같이 터질 수 있는 공정성 버그**(이 큐가 존재하는 이유 자체를 훼손하는 문제)로 판단해 제대로 고침.
+- **수정**: score를 `Date.now()` 대신 Redis `INCR`로 채번한 단조 증가 정수로 교체(`queue.service.ts`). Redis가 싱글 스레드라 `INCR`은 동시에 여러 `join()`이 들어와도 절대 같은 값을 두 번 못 주므로, 동점 자체가 구조적으로 불가능해진다.
+- **검증**: `queue.service.spec.ts` 11/11, 전체 API 87/87 로컬 재실행 통과(회귀 없음).
+- **다음**: `cd.yml` 수동 실행으로 GHCR push 확인 → VM 배포+Nginx(3번)로 진행.
