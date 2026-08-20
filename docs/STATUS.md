@@ -5,7 +5,9 @@
 > - **세션 시작 시**: 이 파일을 가장 먼저 읽고 "다음 할 일"부터 이어간다.
 > - **세션 끝 / 커밋 전**: 이 파일을 **덮어써서** 최신 상태로 갱신한다. (시간순 이력·삽질은 `DEVLOG.md`, 결정 근거는 `decisions/`)
 
-**마지막 업데이트:** 2026-08-21 (**배포 2단계 — CI/CD(GitHub Actions) 구축 완료 + 실사용 중 대기열 순번 버그 발견·수정** — `.github/workflows/ci.yml`(push/PR마다 api는 postgres/redis 서비스 컨테이너로 jest까지, web은 lint+vitest+build) · `cd.yml`(수동 트리거로 GHCR에 이미지 push, VM 배포 job은 3번 작업 후 추가 예정) 신규 작성 + 실행 검증 완료(Actions 탭에서 둘 다 그린, GHCR 패키지 2개 공개 전환 확인). 그 과정에서 `ci.yml` 첫 실행이 `queue.service.spec.ts` 1건을 실패시켜 **진짜 버그**를 발견 — 대기열 순번(ZSet score)을 `Date.now()`(밀리초)로 매기다 보니 두 `join()`이 같은 밀리초에 끝나면 동점이 나고 Redis가 동점을 멤버 문자열 사전순으로 정렬해 나중에 온 사람이 먼저 온 사람보다 앞 순번을 받는 문제였음. 로컬은 Redis 왕복 지연 덕에 우연히 안 겹쳤을 뿐, 실제 선착순 트래픽이 몰릴 때도 재현 가능한 공정성 버그로 판단해 Redis `INCR` 기반 단조 증가 시퀀스로 교체(동점 구조적으로 불가능해짐). API 87/87 재검증. **다음은 3. VM 배포 + Nginx**)
+**마지막 업데이트:** 2026-08-21 (**배포 3단계 — VM에 실제 배포 완료(Docker+Nginx+HTTPS), 브라우저 최종 확인만 남음** — `https://app.15.164.234.208.sslip.io`(프론트)·`https://api.15.164.234.208.sslip.io`(백엔드) 둘 다 살아있고 HTTP→HTTPS 리다이렉트, 게이트 엔드포인트까지 curl로 스모크 테스트 완료. **남은 건 브라우저로 게이트→Google 로그인→예매 e2e를 사람이 직접 확인하는 것뿐**(아래 "다음 할 일" 참고). 이전 배포 2단계(CI/CD) 요약은 아래 유지)
+
+**이전 업데이트 (2026-08-21, 배포 2단계):** (**배포 2단계 — CI/CD(GitHub Actions) 구축 완료 + 실사용 중 대기열 순번 버그 발견·수정** — `.github/workflows/ci.yml`(push/PR마다 api는 postgres/redis 서비스 컨테이너로 jest까지, web은 lint+vitest+build) · `cd.yml`(수동 트리거로 GHCR에 이미지 push, VM 배포 job은 3번 작업 후 추가 예정) 신규 작성 + 실행 검증 완료(Actions 탭에서 둘 다 그린, GHCR 패키지 2개 공개 전환 확인). 그 과정에서 `ci.yml` 첫 실행이 `queue.service.spec.ts` 1건을 실패시켜 **진짜 버그**를 발견 — 대기열 순번(ZSet score)을 `Date.now()`(밀리초)로 매기다 보니 두 `join()`이 같은 밀리초에 끝나면 동점이 나고 Redis가 동점을 멤버 문자열 사전순으로 정렬해 나중에 온 사람이 먼저 온 사람보다 앞 순번을 받는 문제였음. 로컬은 Redis 왕복 지연 덕에 우연히 안 겹쳤을 뿐, 실제 선착순 트래픽이 몰릴 때도 재현 가능한 공정성 버그로 판단해 Redis `INCR` 기반 단조 증가 시퀀스로 교체(동점 구조적으로 불가능해짐). API 87/87 재검증. **다음은 3. VM 배포 + Nginx**)
 
 ---
 
@@ -216,6 +218,14 @@
   - **사람이 GitHub 웹에서 직접 처리한 것(자동화 불가)**: ① Settings → Secrets and variables → Actions → Variables에 `NEXT_PUBLIC_API_URL` 등록 ② Settings → Actions → General → Workflow permissions를 "Read and write"로 확인 ③ `cd.yml` 첫 실행 후 GHCR 패키지(`sunchak-api`/`sunchak-web`) 가시성을 Public으로 전환.
   - **⚠️ `ci.yml` 첫 실행에서 실제 버그 발견·수정**: `queue.service.spec.ts`의 "허가 후 재입장하면 새 순번으로 다시 대기한다" 테스트가 로컬에선 늘 통과했는데 GitHub Actions에서만 실패(`rank: 1` 기대 → `rank: 0`). 원인 — `QueueService.join()`이 대기열 순번(ZSet score)을 `Date.now()`(밀리초)로 매기고 있었는데, `services:` 컨테이너 간 Redis 왕복이 로컬보다 훨씬 빨라 두 `join()`이 같은 밀리초 안에 끝나 score가 동점 나고, Redis가 동점을 **멤버 문자열 사전순**("1"<"2")으로 정렬해버려 나중에 온 유저가 먼저 온 유저를 앞질렀다. **CI 환경 특유의 우연이 아니라 실제 선착순 트래픽이 몰릴 때도 재현 가능한 공정성 버그**(이 큐의 존재 이유 자체를 훼손)로 판단 — score를 Redis `INCR` 기반 단조 증가 정수로 교체(`queue.service.ts`). Redis가 싱글 스레드라 `INCR`은 동시에 여러 `join()`이 와도 절대 같은 값을 두 번 못 줘 동점이 구조적으로 불가능해짐.
   - **검증**: `queue.service.spec.ts` 11/11, API 전체 87/87 로컬 재실행 그린(회귀 없음). `ci.yml` 재실행(Actions 탭 스크린샷 확인) — `api-test`(1m2s)·`web-check`(49s) 둘 다 성공, web 40개 테스트 전부 통과. `cd.yml` 수동 실행 → GHCR에 이미지 2개 push 확인 → Public 전환 완료.
+- **✅ VM에 실제 배포 완료 — Docker Engine + 프로덕션 compose + Nginx + HTTPS (2026-08-21)**: 배포 6단계 중 3번.
+  - **Neon pooled/direct 연결 분리 필요 발견**: 프로덕션에서 컨테이너 기동마다 `prisma migrate deploy`가 돌게 만들려던 참에, Neon 공식 문서(WebFetch로 확인)가 "마이그레이션은 direct 연결을 써야 한다(pooled/pgbouncer는 스키마 락과 안 맞음)"고 명시하는 걸 확인 — `schema.prisma`에 `directUrl = env("DIRECT_URL")` 추가, `.env.example`·로컬 `.env`·`ci.yml`에 반영(로컬 Postgres는 풀러가 없어 두 값 동일). `apps/api/Dockerfile`의 CMD도 `prisma migrate deploy && node dist/main.js`로 변경(멱등 명령이라 재배포마다 안전하게 반복 가능).
+  - **ADR 0019 정정**: "쿠키 `Domain` 속성을 `.{IP}.sslip.io`로 지정해야 한다"던 계획이 틀렸음을 발견 — 인증 쿠키는 `api.*` 한 곳으로만 오가서 `Domain` 기본값이 이미 맞고, 서브도메인 간 전송은 기존 `SameSite=None`(prod)이 담당하는 별개 메커니즘. **코드 변경 없이** 개정 이력만 기록.
+  - **VM 설치**: Docker Engine(공식 스크립트) 설치 + `ubuntu`를 `docker` 그룹에 추가 → GHCR 이미지 2개 pull 확인(공개 전환이 실제로 동작함을 검증). `infra/docker-compose.prod.yml` 신규(api/web/redis 3개 컨테이너, Postgres는 없음 — Neon 클라우드. api/web은 `127.0.0.1`에만 바인딩해 Nginx만 거치게 함). 비밀값은 `~/sunchak/api.env`(VM에만 존재, git 미포함, 권한 600)로 분리 — 사용자가 nano로 작성 중 저장 위치가 어긋난 것(`~/api.env` vs `~/sunchak/api.env`)을 SSH로 직접 확인(키 이름만 grep, 값은 안 봄)해 정정.
+  - **Nginx 리버스 프록시**: `app.<IP>.sslip.io`→`127.0.0.1:3000`(web), `api.<IP>.sslip.io`→`127.0.0.1:3001`(api) 두 서버 블록. api 쪽엔 SSE(EventSource) 엔드포인트가 여럿이라(`/reservations/:id/stream`, `/events/:id/queue/stream`, `/demo/stats/stream`) `proxy_buffering off`+`proxy_read_timeout 3600s`로 완화(안 하면 Nginx가 응답을 다 모을 때까지 브라우저에 안 흘려보내거나 연결을 일찍 끊음).
+  - **Let's Encrypt**: `certbot --nginx`(이메일 미등록, 사용자 확인 후 결정 — 개인 학습 프로젝트라 굳이 외부에 이메일 안 넘기는 쪽 선택)로 두 서브도메인 인증서 발급, HTTP→HTTPS 자동 리다이렉트까지 certbot이 Nginx 설정에 반영. 갱신은 certbot이 자동 스케줄링(90일 만료).
+  - **검증**: 컨테이너 3개 기동 후 VM 내부(`127.0.0.1`)에서 api `/health`·web `/` 200 확인 → 외부에서 HTTP(80) 200 확인 → certbot 발급 후 HTTPS(443) 200 + HTTP→HTTPS 301 확인 → 배포된 도메인의 `/demo/gate`에 틀린 비번으로 curl → 401 정상 응답(전체 요청 경로 — Nginx→컨테이너→가드 검증 — 가 실제로 동작함을 확인).
+  - **⚠️ 아직 안 한 것**: 브라우저로 실제 게이트→Google 로그인→예매 e2e 확인(Google OAuth는 실제 계정 상호작용이 필요해 curl로 대체 불가 — 사람이 직접 확인해야 함). Google Cloud Console에 프로덕션 콜백 URI(`https://api.15.164.234.208.sslip.io/auth/google/callback`)가 등록됐는지도 미확인.
 
 ## 🔨 진행 중 / 막힌 것
 - (막힌 것 없음.)
@@ -227,9 +237,8 @@
 2. **"배포" 6개 조각 (`01_기술_로드맵.md` Week 4 기준, ADR 0019로 인프라 결정)**. 순서대로:
    1. ✅ ~~**Dockerize**~~ — `apps/api`/`apps/web` 멀티스테이지 빌드, 로컬 검증 완료(2026-08-20).
    2. ✅ ~~**CI/CD(GitHub Actions)**~~ — `ci.yml`(lint/test 자동)·`cd.yml`(수동, 이미지 빌드+GHCR push) 작성·실행 검증 완료(2026-08-21). VM pull&재기동 job은 3번 완료 후 추가.
-   3. **← 다음: VM 배포 + Nginx 리버스 프록시** — AWS 서울 리전 t3.micro는 발급·SSH 확인 완료(아래 "배포 VM 정보"), **Docker·Nginx·Let's Encrypt 설치는 아직 안 함**. Neon은 이미 있음(ADR 0010).
-      - **도메인: ADR 0019로 확정** — `sslip.io` 무료 매직 도메인으로 서브도메인 공유(`app.<IP>.sslip.io` / `api.<IP>.sslip.io`), `SameSite=Lax` 유지.
-      - 배포 시 `GOOGLE_CALLBACK_URL`·`WEB_APP_URL`을 매직 도메인으로, Google Cloud Console의 승인된 리디렉션 URI도 함께 갱신 필요.
+   3. ✅ ~~**VM 배포 + Nginx 리버스 프록시**~~ — Docker+compose+Nginx+HTTPS(Let's Encrypt) 전부 기동·curl 스모크 테스트 완료(2026-08-21). `https://app.15.164.234.208.sslip.io` / `https://api.15.164.234.208.sslip.io` 살아있음.
+      - **← 다음(3번 마무리)**: ① Google Cloud Console에 프로덕션 콜백 URI(`https://api.15.164.234.208.sslip.io/auth/google/callback`)가 실제로 등록됐는지 확인 ② 브라우저로 게이트→Google 로그인→예매 e2e를 사람이 직접 확인(Google OAuth라 curl로 대체 불가).
    4. **관측(Prometheus+Grafana)** — 요청률/p95/에러율/큐 적체 대시보드. 미착수.
    5. **최종 k6 부하 리포트** — `apps/api/test/load/`엔 W2 락 비교용 스크립트만 있음(그건 §8 "before/after" 문서로 이미 남김, `docs/perf/`). 전체 파이프라인(HELD+큐+SSE) 완성 후의 최종 부하 리포트는 별도로 아직 없음.
    6. **README + 회고(트러블슈팅 기록)** — 미작성.
@@ -245,7 +254,9 @@
 - **키 페어**: `sunchak-key` — **`.pem` 파일은 gitignore 대상이라 git에 없음. 다른 기기에서 접속하려면 AWS 콘솔에서 새 키 페어를 발급해 기존 인스턴스에 연결하거나(재부팅 필요), 이 기기의 `.pem` 파일을 안전한 방법으로 직접 옮겨야 함.**
 - **접속**: `ssh -i <키경로>/sunchak-key.pem ubuntu@15.164.234.208`
 - **보안 그룹**: SSH(22, 내 IP)·HTTP(80, Anywhere-IPv4)·HTTPS(443, Anywhere-IPv4) 인바운드 허용됨.
-- **현재 상태**: SSH 접속만 확인됨. Docker·Nginx·Let's Encrypt·앱 배포는 전부 아직 미착수(다음 세션에서 진행).
+- **현재 상태(2026-08-21)**: Docker Engine·Nginx·Let's Encrypt·앱(api/web/redis 컨테이너) 전부 배포 완료. **라이브 URL**: `https://app.15.164.234.208.sslip.io`(프론트) / `https://api.15.164.234.208.sslip.io`(백엔드). VM 재배포 절차: 로컬에서 `cd.yml` 수동 실행(GHCR에 새 이미지 push) → VM에서 `cd ~/sunchak && docker compose pull && docker compose up -d`.
+- **VM의 비밀값 파일**: `~/sunchak/api.env`(git 미포함, 권한 600) — 이 기기가 아닌 다른 기기에서 재배포하려면 이 값들을 다시 채워야 함(위 "다음 할 일" 안내 참고).
+- **VM을 재구성해야 할 경우(IP 변경 등)**: ① Docker Engine 설치(`curl -fsSL https://get.docker.com | sudo sh`) ② `infra/docker-compose.prod.yml`을 `~/sunchak/docker-compose.yml`로 올리고 `api.env` 재작성 ③ `infra/nginx/*.conf`를 `/etc/nginx/sites-available/`에 배치 후 `sites-enabled`에 심볼릭 링크·기본 `default` 사이트 제거 ④ `sudo certbot --nginx -d app.<새IP>.sslip.io -d api.<새IP>.sslip.io --redirect`.
 - **AWS 프리 티어**: 12개월 한시(Oracle/GCP의 "영구 무료"와 다름) — 만료일은 콘솔 우측 상단 계정명 → "계정" → 계정 생성일 + 12개월로 계산.
 
 ## 🖥️ 이 기기(현재) 로컬 환경 — 재세팅 시 주의

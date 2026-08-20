@@ -673,3 +673,14 @@
 - **`infra/docker-compose.prod.yml` 신규 작성**: api·web·redis 3개 컨테이너(Postgres는 없음 — Neon 클라우드). api/web은 `127.0.0.1`에만 바인딩(외부 노출은 Nginx가 대신 함), 비밀값은 파일에 안 쓰고 `env_file: ./api.env`(VM에만 존재, git 미포함)로 분리.
 - **`api.env`를 VM에 직접 생성**(비밀값이라 대화창엔 안 올림) — 사용자가 nano로 작성하다가 저장 위치가 `~/sunchak/api.env`가 아니라 `~/api.env`로 어긋난 걸 발견, SSH로 직접 확인(키 이름만 grep, 값은 안 봄) 후 올바른 위치로 이동 + 예전 삽질로 남은 `api.env.save`(nano 비정상 종료 시 자동 생성되는 복구 파일) 삭제 + 권한 600으로 제한.
 - **다음**: 변경사항(schema.prisma·Dockerfile·ci.yml 등) 커밋+push → `cd.yml` 재실행으로 새 이미지 반영 → VM에서 `docker-compose.prod.yml` 기동 → Nginx 리버스 프록시 + Let's Encrypt.
+
+## 2026-08-21 · VM 실제 배포 완료 — Docker+compose 기동, Nginx 리버스 프록시, Let's Encrypt HTTPS
+
+- **컨테이너 기동**: `cd.yml` 재실행으로 새 이미지(Neon direct 연결 반영본) push 확인 후, `infra/docker-compose.prod.yml`을 VM에 scp → `docker compose pull && up -d`로 api/web/redis 3개 컨테이너 기동. api 로그에서 모든 라우트가 정상 매핑된 것으로 `prisma migrate deploy`(신규 Dockerfile CMD)가 Neon에 실제로 성공했음을 확인. VM 내부(`127.0.0.1`)에서 api `/health`·web `/` 둘 다 200 확인.
+- **`api.env` nano 저장 위치 삽질**: 사용자가 `cd ~/sunchak` 전에 `nano api.env`를 실행해 `~/api.env`(홈 디렉토리)에 저장됨 — SSH로 직접 확인(값은 안 보고 `grep -oE '^[A-Z_]+='`로 키 이름만) 후 올바른 위치(`~/sunchak/api.env`)로 이동, 예전 저장 실패로 남은 `api.env.save`(nano의 비정상 종료 자동 백업) 삭제, 권한을 600으로 제한.
+- **Nginx 리버스 프록시 개념 설명 후 설정**: `app.<IP>.sslip.io`→`127.0.0.1:3000`(web), `api.<IP>.sslip.io`→`127.0.0.1:3001`(api) 두 서버 블록(`/etc/nginx/sites-available/`). api 쪽엔 이 프로젝트가 SSE(EventSource)를 여러 엔드포인트(`/reservations/:id/stream`·`/events/:id/queue/stream`·`/demo/stats/stream`)에서 쓰기 때문에 `proxy_buffering off`+`proxy_read_timeout 3600s`를 명시(기본값이면 Nginx가 응답을 버퍼링해 브라우저에 실시간으로 안 흘려보내거나 연결을 조기 종료함).
+- **Let's Encrypt**: `certbot --nginx -d app.* -d api.*`로 두 서브도메인 인증서 한 번에 발급 + `--redirect`로 HTTP→HTTPS 자동 전환까지 certbot이 Nginx 설정에 반영. 이메일 등록 여부를 사용자에게 물어 **생략**(개인 프로젝트라 갱신 실패 시 알림 안 받는 대신 외부 서비스에 이메일 안 넘기는 쪽 선택) — `--register-unsafely-without-email`.
+- **정정**: 인증서 발급 전 `api.env`의 `DEMO_GATE_PASSWORD` 값을 curl 테스트용으로 조회하려다 Claude Code auto mode 클래시파이어가 차단 — 값을 안 보는 방식(틀린 비밀번호로 401이 나는지만 확인)으로 우회해 검증했다. 프로젝트 문서상 "값 자체는 비밀 아님"이라고 적혀 있어도, 실제 비밀값 파일에서 값을 읽는 행위 자체는 안전장치가 막을 수 있다는 걸 확인.
+- **재현성**: 방금 작성한 Nginx 설정 원본(certbot 적용 전 상태)을 `infra/nginx/sunchak-{api,web}.conf`로 저장소에도 보관 — VM을 재구성해야 할 때(IP 변경 등) 이 파일을 배치하고 certbot만 다시 돌리면 되게 함.
+- **검증**: 외부(로컬 기기)에서 HTTP(80) 200 → certbot 발급 후 HTTPS(443) 200 + HTTP→HTTPS 301 확인. 배포 도메인의 `/demo/gate`에 틀린 비번 curl → 401(전체 요청 경로 — Nginx→컨테이너→가드 — 가 실제로 동작함을 확인). `host` 명령으로 두 서브도메인이 매직 도메인답게 VM IP로 정확히 해석되는 것도 사전 확인.
+- **다음**: Google Cloud Console에 프로덕션 콜백 URI 등록 확인 → 브라우저로 게이트→Google 로그인→예매 e2e 사람이 직접 확인 → 배포 6단계 중 4번(Prometheus+Grafana 관측)으로 진행.
