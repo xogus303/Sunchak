@@ -683,4 +683,5 @@
 - **정정**: 인증서 발급 전 `api.env`의 `DEMO_GATE_PASSWORD` 값을 curl 테스트용으로 조회하려다 Claude Code auto mode 클래시파이어가 차단 — 값을 안 보는 방식(틀린 비밀번호로 401이 나는지만 확인)으로 우회해 검증했다. 프로젝트 문서상 "값 자체는 비밀 아님"이라고 적혀 있어도, 실제 비밀값 파일에서 값을 읽는 행위 자체는 안전장치가 막을 수 있다는 걸 확인.
 - **재현성**: 방금 작성한 Nginx 설정 원본(certbot 적용 전 상태)을 `infra/nginx/sunchak-{api,web}.conf`로 저장소에도 보관 — VM을 재구성해야 할 때(IP 변경 등) 이 파일을 배치하고 certbot만 다시 돌리면 되게 함.
 - **검증**: 외부(로컬 기기)에서 HTTP(80) 200 → certbot 발급 후 HTTPS(443) 200 + HTTP→HTTPS 301 확인. 배포 도메인의 `/demo/gate`에 틀린 비번 curl → 401(전체 요청 경로 — Nginx→컨테이너→가드 — 가 실제로 동작함을 확인). `host` 명령으로 두 서브도메인이 매직 도메인답게 VM IP로 정확히 해석되는 것도 사전 확인.
-- **다음**: Google Cloud Console에 프로덕션 콜백 URI 등록 확인 → 브라우저로 게이트→Google 로그인→예매 e2e 사람이 직접 확인 → 배포 6단계 중 4번(Prometheus+Grafana 관측)으로 진행.
+- **브라우저 e2e 확인(사용자 직접 검증)**: 스크린샷으로 게이트 통과→Google 로그인→이벤트 상세 진입→12매 예매 확정→SSE 실시간 판매 현황(게이지·퍼센티지 막대·세부 카운트) 정상 갱신까지 전부 확인됨. Google Cloud Console 콜백 URI도 이미 등록돼 있었음(로그인 성공이 증거). **배포 6단계 중 1~3번(Dockerize·CI/CD·VM+Nginx) 전부 완료.**
+- **다음**: 배포 6단계 중 4번(Prometheus+Grafana 관측)으로 진행.

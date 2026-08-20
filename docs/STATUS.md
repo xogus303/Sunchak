@@ -5,7 +5,7 @@
 > - **세션 시작 시**: 이 파일을 가장 먼저 읽고 "다음 할 일"부터 이어간다.
 > - **세션 끝 / 커밋 전**: 이 파일을 **덮어써서** 최신 상태로 갱신한다. (시간순 이력·삽질은 `DEVLOG.md`, 결정 근거는 `decisions/`)
 
-**마지막 업데이트:** 2026-08-21 (**배포 3단계 — VM에 실제 배포 완료(Docker+Nginx+HTTPS), 브라우저 최종 확인만 남음** — `https://app.15.164.234.208.sslip.io`(프론트)·`https://api.15.164.234.208.sslip.io`(백엔드) 둘 다 살아있고 HTTP→HTTPS 리다이렉트, 게이트 엔드포인트까지 curl로 스모크 테스트 완료. **남은 건 브라우저로 게이트→Google 로그인→예매 e2e를 사람이 직접 확인하는 것뿐**(아래 "다음 할 일" 참고). 이전 배포 2단계(CI/CD) 요약은 아래 유지)
+**마지막 업데이트:** 2026-08-21 (**배포 3단계 완료 — VM 실배포 + 브라우저 e2e까지 확인** — `https://app.15.164.234.208.sslip.io`(프론트)·`https://api.15.164.234.208.sslip.io`(백엔드) 라이브. Docker+Nginx+HTTPS(Let's Encrypt) 기동 후 curl 스모크 테스트에 이어, 사용자가 실제 브라우저로 게이트→Google 로그인→이벤트 예매(12매 확정)까지 진행해 스크린샷으로 확인 — SSE 실시간 판매 현황(게이지·퍼센티지 막대)도 정상 갱신됨. **배포 6단계 중 1~3번(Dockerize·CI/CD·VM+Nginx) 전부 완료, 다음은 4번(Prometheus+Grafana 관측)**. 이전 배포 2단계(CI/CD) 요약은 아래 유지)
 
 **이전 업데이트 (2026-08-21, 배포 2단계):** (**배포 2단계 — CI/CD(GitHub Actions) 구축 완료 + 실사용 중 대기열 순번 버그 발견·수정** — `.github/workflows/ci.yml`(push/PR마다 api는 postgres/redis 서비스 컨테이너로 jest까지, web은 lint+vitest+build) · `cd.yml`(수동 트리거로 GHCR에 이미지 push, VM 배포 job은 3번 작업 후 추가 예정) 신규 작성 + 실행 검증 완료(Actions 탭에서 둘 다 그린, GHCR 패키지 2개 공개 전환 확인). 그 과정에서 `ci.yml` 첫 실행이 `queue.service.spec.ts` 1건을 실패시켜 **진짜 버그**를 발견 — 대기열 순번(ZSet score)을 `Date.now()`(밀리초)로 매기다 보니 두 `join()`이 같은 밀리초에 끝나면 동점이 나고 Redis가 동점을 멤버 문자열 사전순으로 정렬해 나중에 온 사람이 먼저 온 사람보다 앞 순번을 받는 문제였음. 로컬은 Redis 왕복 지연 덕에 우연히 안 겹쳤을 뿐, 실제 선착순 트래픽이 몰릴 때도 재현 가능한 공정성 버그로 판단해 Redis `INCR` 기반 단조 증가 시퀀스로 교체(동점 구조적으로 불가능해짐). API 87/87 재검증. **다음은 3. VM 배포 + Nginx**)
 
@@ -225,7 +225,7 @@
   - **Nginx 리버스 프록시**: `app.<IP>.sslip.io`→`127.0.0.1:3000`(web), `api.<IP>.sslip.io`→`127.0.0.1:3001`(api) 두 서버 블록. api 쪽엔 SSE(EventSource) 엔드포인트가 여럿이라(`/reservations/:id/stream`, `/events/:id/queue/stream`, `/demo/stats/stream`) `proxy_buffering off`+`proxy_read_timeout 3600s`로 완화(안 하면 Nginx가 응답을 다 모을 때까지 브라우저에 안 흘려보내거나 연결을 일찍 끊음).
   - **Let's Encrypt**: `certbot --nginx`(이메일 미등록, 사용자 확인 후 결정 — 개인 학습 프로젝트라 굳이 외부에 이메일 안 넘기는 쪽 선택)로 두 서브도메인 인증서 발급, HTTP→HTTPS 자동 리다이렉트까지 certbot이 Nginx 설정에 반영. 갱신은 certbot이 자동 스케줄링(90일 만료).
   - **검증**: 컨테이너 3개 기동 후 VM 내부(`127.0.0.1`)에서 api `/health`·web `/` 200 확인 → 외부에서 HTTP(80) 200 확인 → certbot 발급 후 HTTPS(443) 200 + HTTP→HTTPS 301 확인 → 배포된 도메인의 `/demo/gate`에 틀린 비번으로 curl → 401 정상 응답(전체 요청 경로 — Nginx→컨테이너→가드 검증 — 가 실제로 동작함을 확인).
-  - **⚠️ 아직 안 한 것**: 브라우저로 실제 게이트→Google 로그인→예매 e2e 확인(Google OAuth는 실제 계정 상호작용이 필요해 curl로 대체 불가 — 사람이 직접 확인해야 함). Google Cloud Console에 프로덕션 콜백 URI(`https://api.15.164.234.208.sslip.io/auth/google/callback`)가 등록됐는지도 미확인.
+  - **✅ 브라우저 e2e 확인 완료(사용자 직접 검증)**: 게이트 통과 → Google 로그인 → 이벤트 상세 진입 → 12매 예매 확정("확정" 배지) → 오른쪽 실시간 판매 현황(재고 잔량 게이지, 최종 결과 퍼센티지 막대, 확보중/결제성공/결제실패/포기 등 세부 카운트)이 SSE로 정상 갱신되는 것까지 스크린샷으로 확인. Google Cloud Console 콜백 URI 등록도 이미 반영돼 있었음(로그인 성공이 그 증거).
 
 ## 🔨 진행 중 / 막힌 것
 - (막힌 것 없음.)
@@ -237,9 +237,8 @@
 2. **"배포" 6개 조각 (`01_기술_로드맵.md` Week 4 기준, ADR 0019로 인프라 결정)**. 순서대로:
    1. ✅ ~~**Dockerize**~~ — `apps/api`/`apps/web` 멀티스테이지 빌드, 로컬 검증 완료(2026-08-20).
    2. ✅ ~~**CI/CD(GitHub Actions)**~~ — `ci.yml`(lint/test 자동)·`cd.yml`(수동, 이미지 빌드+GHCR push) 작성·실행 검증 완료(2026-08-21). VM pull&재기동 job은 3번 완료 후 추가.
-   3. ✅ ~~**VM 배포 + Nginx 리버스 프록시**~~ — Docker+compose+Nginx+HTTPS(Let's Encrypt) 전부 기동·curl 스모크 테스트 완료(2026-08-21). `https://app.15.164.234.208.sslip.io` / `https://api.15.164.234.208.sslip.io` 살아있음.
-      - **← 다음(3번 마무리)**: ① Google Cloud Console에 프로덕션 콜백 URI(`https://api.15.164.234.208.sslip.io/auth/google/callback`)가 실제로 등록됐는지 확인 ② 브라우저로 게이트→Google 로그인→예매 e2e를 사람이 직접 확인(Google OAuth라 curl로 대체 불가).
-   4. **관측(Prometheus+Grafana)** — 요청률/p95/에러율/큐 적체 대시보드. 미착수.
+   3. ✅ ~~**VM 배포 + Nginx 리버스 프록시**~~ — Docker+compose+Nginx+HTTPS(Let's Encrypt) 기동 + 브라우저 e2e(게이트→Google 로그인→예매→SSE 실시간 대시보드) 사용자 직접 확인까지 완료(2026-08-21). `https://app.15.164.234.208.sslip.io` / `https://api.15.164.234.208.sslip.io` 라이브. **배포 파이프라인(1~3번) 전체 완성.**
+   4. **← 다음: 관측(Prometheus+Grafana)** — 요청률/p95/에러율/큐 적체 대시보드. 미착수.
    5. **최종 k6 부하 리포트** — `apps/api/test/load/`엔 W2 락 비교용 스크립트만 있음(그건 §8 "before/after" 문서로 이미 남김, `docs/perf/`). 전체 파이프라인(HELD+큐+SSE) 완성 후의 최종 부하 리포트는 별도로 아직 없음.
    6. **README + 회고(트러블슈팅 기록)** — 미작성.
    7. **(필수) ADR·설계 문서 최신화** — `docs/decisions/` 전체를 실제 구현과 대조해 설계 의도와 다르게 구현된 부분이 있는지 체크. 다르면 문서를 고치는 게 아니라 해당 ADR에 `Superseded`로 표시하고 실제와 다른 이유를 남긴다(§0 "대체된 결정은 지우지 말고 Superseded로 표시" 원칙).
