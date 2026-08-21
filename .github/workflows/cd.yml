@@ -1,20 +1,37 @@
-# 지금은 이미지 빌드 + GHCR push까지만 한다. VM에 Docker/Nginx가 아직 없어서
-# "SSH로 접속해 pull&재기동" 단계(deploy job)는 다음 작업(VM 배포+Nginx)에서
-# VM 쪽 구조(compose 파일 위치, 컨테이너 구성)가 정해지면 이 파일에 추가한다.
-# 그 전까지는 사람이 직접 push된 이미지를 확인하는 용도.
+# 전체 배포 파이프라인 — main에 push되면 ci.yml이 먼저 테스트를 돌리고,
+# 그게 성공했을 때만(workflow_run) 이 워크플로우가 이미지를 빌드해 GHCR에
+# push한 뒤 VM에 SSH로 접속해 반영까지 자동으로 끝낸다(ADR 0022).
+# workflow_dispatch도 남겨둬 필요하면 수동으로도 다시 돌릴 수 있게 한다.
 name: CD
 
 on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
 
 jobs:
   build-and-push:
+    # workflow_dispatch(수동)는 항상 실행. workflow_run(자동)은 ci.yml이
+    # 실제로 성공했을 때만 — 실패한 커밋의 이미지가 만들어지는 걸 막는다.
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+    outputs:
+      sha: ${{ steps.resolve-sha.outputs.sha }}
     steps:
+      # workflow_run으로 트리거되면 github.sha는 이 워크플로우 파일이 있는
+      # 커밋이 아니라 ci.yml이 실제로 검증한 커밋(head_sha)을 가리켜야 한다.
+      - name: 빌드할 커밋 SHA 결정
+        id: resolve-sha
+        run: echo "sha=${{ github.event.workflow_run.head_sha || github.sha }}" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.resolve-sha.outputs.sha }}
 
       - name: GHCR 로그인
         uses: docker/login-action@v3
@@ -31,7 +48,7 @@ jobs:
           push: true
           tags: |
             ghcr.io/${{ github.repository_owner }}/sunchak-api:latest
-            ghcr.io/${{ github.repository_owner }}/sunchak-api:${{ github.sha }}
+            ghcr.io/${{ github.repository_owner }}/sunchak-api:${{ steps.resolve-sha.outputs.sha }}
 
       - name: web 이미지 빌드 & push
         uses: docker/build-push-action@v6
@@ -43,4 +60,20 @@ jobs:
             NEXT_PUBLIC_API_URL=${{ vars.NEXT_PUBLIC_API_URL }}
           tags: |
             ghcr.io/${{ github.repository_owner }}/sunchak-web:latest
-            ghcr.io/${{ github.repository_owner }}/sunchak-web:${{ github.sha }}
+            ghcr.io/${{ github.repository_owner }}/sunchak-web:${{ steps.resolve-sha.outputs.sha }}
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: VM에 SSH로 접속해 새 이미지 pull & 재기동
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USERNAME }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          fingerprint: ${{ secrets.VM_HOST_FINGERPRINT }}
+          script: |
+            cd ~/sunchak
+            docker compose pull
+            docker compose up -d
