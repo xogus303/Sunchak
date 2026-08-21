@@ -5,7 +5,7 @@
 > - **세션 시작 시**: 이 파일을 가장 먼저 읽고 "다음 할 일"부터 이어간다.
 > - **세션 끝 / 커밋 전**: 이 파일을 **덮어써서** 최신 상태로 갱신한다. (시간순 이력·삽질은 `DEVLOG.md`, 결정 근거는 `decisions/`)
 
-**마지막 업데이트:** 2026-08-21 (**배포 4단계 — Prometheus+Grafana 관측 인프라 구축·배포 완료(ADR 0020)** — apps/api에 `/metrics` 신규 노출(요청률·응답시간 히스토그램·confirm/payment 큐 적체, `@Public()`으로 게이트 우회), VM에 node-exporter·prometheus·grafana 3개 컨테이너 추가 기동, `https://grafana.15.164.234.208.sslip.io`(Nginx+HTTPS) 라이브. 배포 중 RAM 1GB VM에서 Grafana가 부팅만으로 메모리 상한(200m)의 99.95%를 소진하는 실측 문제 발견 → 300m으로 상향 + 스왑 1GB 신규 추가로 완화. Prometheus 타겟 3개(api·node·prometheus 자신) 전부 `up` 확인. **대시보드 패널 4개(요청률/p95/에러율/큐 적체)도 사용자가 Grafana UI에서 직접 PromQL을 작성해 완성**(`histogram_quantile`·`rate`·라벨 필터 등 학습). **배포 6단계 중 1~5번 전부 완료, 다음은 6번(README+회고).** 이전 배포 3단계(VM+Nginx) 요약은 아래 유지)
+**마지막 업데이트:** 2026-08-21 (**배포 4단계 — Prometheus+Grafana 관측 인프라 구축·배포 완료(ADR 0020)** — apps/api에 `/metrics` 신규 노출(요청률·응답시간 히스토그램·confirm/payment 큐 적체, `@Public()`으로 게이트 우회), VM에 node-exporter·prometheus·grafana 3개 컨테이너 추가 기동, `https://grafana.15.164.234.208.sslip.io`(Nginx+HTTPS) 라이브. 배포 중 RAM 1GB VM에서 Grafana가 부팅만으로 메모리 상한(200m)의 99.95%를 소진하는 실측 문제 발견 → 300m으로 상향 + 스왑 1GB 신규 추가로 완화. Prometheus 타겟 3개(api·node·prometheus 자신) 전부 `up` 확인. **대시보드 패널 4개(요청률/p95/에러율/큐 적체)도 사용자가 Grafana UI에서 직접 PromQL을 작성해 완성**(`histogram_quantile`·`rate`·라벨 필터 등 학습). **배포 6단계 중 1~6번 전부 완료, 다음은 7번(ADR 문서 최신화).** 이전 배포 3단계(VM+Nginx) 요약은 아래 유지)
 
 **이전 업데이트 (2026-08-21, 배포 5단계):** (**최종 k6 부하 리포트 완료** — 대기열→HELD→결제 전체 파이프라인을 처음으로 k6로 실측(`full_pipeline_load.js`). 로컬(150 VU, 재고 100 — 입장허가 126·재고소진 24)과 배포 VM(8 VU, VM 자원 보호로 소규모)을 나란히 측정, 체크 성공률 둘 다 100%. VM 개별 요청 지연이 로컬보다 6~8배 높게 나왔는데(p95 로컬 110ms vs VM 844ms) 원인을 Neon DB 네트워크 홉·실제 인터넷 왕복·t3.micro 사양 세 가지로 설명 가능함을 확인(원인불명 이상 지연 없음). VM 테스트 직후 Prometheus 질의로 이 부하가 실제로 잡혔는지도 검증(오늘 만든 관측 파이프라인의 첫 실전 확인). 결과 문서 `docs/perf/2026-08-21-full-pipeline-load.md`. VM에 만든 테스트 계정·이벤트는 정리 완료)
 
@@ -244,8 +244,8 @@
    3. ✅ ~~**VM 배포 + Nginx 리버스 프록시**~~ — Docker+compose+Nginx+HTTPS(Let's Encrypt) 기동 + 브라우저 e2e(게이트→Google 로그인→예매→SSE 실시간 대시보드) 사용자 직접 확인까지 완료(2026-08-21). `https://app.15.164.234.208.sslip.io` / `https://api.15.164.234.208.sslip.io` 라이브. **배포 파이프라인(1~3번) 전체 완성.**
    4. ✅ ~~**관측(Prometheus+Grafana)**~~ — 인프라·지표 배포(ADR 0020) + 대시보드 패널 4개(요청률/p95/에러율/큐 적체) 사용자가 직접 Grafana UI에서 PromQL 작성해 완성(2026-08-21). `https://grafana.15.164.234.208.sslip.io`.
    5. ✅ ~~**최종 k6 부하 리포트**~~ — `full_pipeline_load.js`/`full_pipeline_bench.sh` 신규 작성(대기열→HELD→결제 전체 흐름). 로컬(150 VU)·배포 VM(8 VU, 자원 보호로 소규모) 둘 다 실측, 결과 `docs/perf/2026-08-21-full-pipeline-load.md`. 체크 성공률 100%, VM p99 개별 요청 1초 미만. VM 테스트 후 생성한 테스트 계정·이벤트는 정리 완료(2026-08-21).
-   6. **← 다음: README + 회고(트러블슈팅 기록)** — 미작성.
-   7. **(필수) ADR·설계 문서 최신화** — `docs/decisions/` 전체를 실제 구현과 대조해 설계 의도와 다르게 구현된 부분이 있는지 체크. 다르면 문서를 고치는 게 아니라 해당 ADR에 `Superseded`로 표시하고 실제와 다른 이유를 남긴다(§0 "대체된 결정은 지우지 말고 Superseded로 표시" 원칙).
+   6. ✅ ~~**README + 회고(트러블슈팅 기록)**~~ — 루트 `README.md` W1 착수 이전 상태로 낡아있던 것 전면 개정(라이브 데모 URL 3개·예매 파이프라인 다이어그램·실제 폴더 구조·성능 요약·회고 6건). 회고는 DEVLOG·STATUS 근거 기반으로만 작성(지어내지 않음) — lost update 재현, Redis 4.6배, StrictMode 이중마운트 버그, obliterate 사고, CI 동점 버그, Grafana 메모리 실측 6개 사례(2026-08-21).
+   7. **← 다음: (필수) ADR·설계 문서 최신화** — `docs/decisions/` 전체를 실제 구현과 대조해 설계 의도와 다르게 구현된 부분이 있는지 체크. 다르면 문서를 고치는 게 아니라 해당 ADR에 `Superseded`로 표시하고 실제와 다른 이유를 남긴다(§0 "대체된 결정은 지우지 말고 Superseded로 표시" 원칙). 2026-08-08에 한 번 점검했으나(드리프트 4건 기록) 그 이후(대기열 실측 버그·유저별 격리·관측 인프라 등) 변경분은 아직 미점검.
    - (여유 있으면 스트레치, 필수 아님) 분산 락(Redlock)·read replica·Terraform·K8s.
 3. (선택) `simulateLoad()`가 쿨다운을 데모 이벤트 확인보다 먼저 거는 순서 정리(위 축 B-1/B-2 "발견(보류)" 참고).
 4. (선택, 프로젝트 완성 후) **npm 패키지 보안 검토 자동화 도입** — 비용 0원. GitHub Dependabot 활성화(리포 Settings) + CI(GitHub Actions)에 `pnpm audit` 스텝 추가 + Socket.dev 무료 GitHub App 연결(행위 기반 탐지, PR마다 자동 실행). **커버 범위가 npq보다 넓어서 선택**: npq는 설치 순간 1회 스냅샷만 보는 반면, 이 조합은 이미 설치된 의존성 전체를 생애주기 내내 계속 재검사함(설치 후 새로 등록되는 CVE까지 커버). 2026-08-06 대화에서 조사·확정.
