@@ -5,7 +5,7 @@
 > - **세션 시작 시**: 이 파일을 가장 먼저 읽고 "다음 할 일"부터 이어간다.
 > - **세션 끝 / 커밋 전**: 이 파일을 **덮어써서** 최신 상태로 갱신한다. (시간순 이력·삽질은 `DEVLOG.md`, 결정 근거는 `decisions/`)
 
-**마지막 업데이트:** 2026-08-21 (**배포 4단계 — Prometheus+Grafana 관측 인프라 구축·배포 완료(ADR 0020)** — apps/api에 `/metrics` 신규 노출(요청률·응답시간 히스토그램·confirm/payment 큐 적체, `@Public()`으로 게이트 우회), VM에 node-exporter·prometheus·grafana 3개 컨테이너 추가 기동, `https://grafana.15.164.234.208.sslip.io`(Nginx+HTTPS) 라이브. 배포 중 RAM 1GB VM에서 Grafana가 부팅만으로 메모리 상한(200m)의 99.95%를 소진하는 실측 문제 발견 → 300m으로 상향 + 스왑 1GB 신규 추가로 완화. Prometheus 타겟 3개(api·node·prometheus 자신) 전부 `up` 확인. **아직 실제 대시보드 패널(요청률/p95/에러율/큐 적체)은 미구성 — 다음 세션에서 이어서.** 이전 배포 3단계(VM+Nginx) 요약은 아래 유지)
+**마지막 업데이트:** 2026-08-21 (**배포 4단계 — Prometheus+Grafana 관측 인프라 구축·배포 완료(ADR 0020)** — apps/api에 `/metrics` 신규 노출(요청률·응답시간 히스토그램·confirm/payment 큐 적체, `@Public()`으로 게이트 우회), VM에 node-exporter·prometheus·grafana 3개 컨테이너 추가 기동, `https://grafana.15.164.234.208.sslip.io`(Nginx+HTTPS) 라이브. 배포 중 RAM 1GB VM에서 Grafana가 부팅만으로 메모리 상한(200m)의 99.95%를 소진하는 실측 문제 발견 → 300m으로 상향 + 스왑 1GB 신규 추가로 완화. Prometheus 타겟 3개(api·node·prometheus 자신) 전부 `up` 확인. **대시보드 패널 4개(요청률/p95/에러율/큐 적체)도 사용자가 Grafana UI에서 직접 PromQL을 작성해 완성**(`histogram_quantile`·`rate`·라벨 필터 등 학습). **배포 6단계 중 1~4번 전부 완료, 다음은 5번(최종 k6 부하 리포트).** 이전 배포 3단계(VM+Nginx) 요약은 아래 유지)
 
 **이전 업데이트 (2026-08-21, 배포 3단계):** (**배포 3단계 완료 — VM 실배포 + 브라우저 e2e까지 확인** — `https://app.15.164.234.208.sslip.io`(프론트)·`https://api.15.164.234.208.sslip.io`(백엔드) 라이브. Docker+Nginx+HTTPS(Let's Encrypt) 기동 후 curl 스모크 테스트에 이어, 사용자가 실제 브라우저로 게이트→Google 로그인→이벤트 예매(12매 확정)까지 진행해 스크린샷으로 확인 — SSE 실시간 판매 현황(게이지·퍼센티지 막대)도 정상 갱신됨. **배포 6단계 중 1~3번(Dockerize·CI/CD·VM+Nginx) 전부 완료, 다음은 4번(Prometheus+Grafana 관측)**. 이전 배포 2단계(CI/CD) 요약은 아래 유지)
 
@@ -240,8 +240,8 @@
    1. ✅ ~~**Dockerize**~~ — `apps/api`/`apps/web` 멀티스테이지 빌드, 로컬 검증 완료(2026-08-20).
    2. ✅ ~~**CI/CD(GitHub Actions)**~~ — `ci.yml`(lint/test 자동)·`cd.yml`(수동, 이미지 빌드+GHCR push) 작성·실행 검증 완료(2026-08-21). VM pull&재기동 job은 3번 완료 후 추가.
    3. ✅ ~~**VM 배포 + Nginx 리버스 프록시**~~ — Docker+compose+Nginx+HTTPS(Let's Encrypt) 기동 + 브라우저 e2e(게이트→Google 로그인→예매→SSE 실시간 대시보드) 사용자 직접 확인까지 완료(2026-08-21). `https://app.15.164.234.208.sslip.io` / `https://api.15.164.234.208.sslip.io` 라이브. **배포 파이프라인(1~3번) 전체 완성.**
-   4. **← 다음: 관측(Prometheus+Grafana) 대시보드 패널 구성** — 인프라·지표 배포는 완료(ADR 0020, 2026-08-21). `https://grafana.15.164.234.208.sslip.io` 로그인 후, 요청률/p95/에러율/큐 적체 패널을 실제로 만드는 것만 남음(PromQL 작성 포함).
-   5. **최종 k6 부하 리포트** — `apps/api/test/load/`엔 W2 락 비교용 스크립트만 있음(그건 §8 "before/after" 문서로 이미 남김, `docs/perf/`). 전체 파이프라인(HELD+큐+SSE) 완성 후의 최종 부하 리포트는 별도로 아직 없음.
+   4. ✅ ~~**관측(Prometheus+Grafana)**~~ — 인프라·지표 배포(ADR 0020) + 대시보드 패널 4개(요청률/p95/에러율/큐 적체) 사용자가 직접 Grafana UI에서 PromQL 작성해 완성(2026-08-21). `https://grafana.15.164.234.208.sslip.io`.
+   5. **← 다음: 최종 k6 부하 리포트** — 전체 파이프라인(게이트→대기열→HELD→결제→확정→SSE) 완성 후의 부하 테스트. `apps/api/test/load/`엔 W2 락 비교용 스크립트만 있음(그건 §8 "before/after" 문서로 이미 남김, `docs/perf/`). 지금 막 붙인 Grafana로 실시간 관찰하며 돌리면 좋은 검증 기회.
    6. **README + 회고(트러블슈팅 기록)** — 미작성.
    7. **(필수) ADR·설계 문서 최신화** — `docs/decisions/` 전체를 실제 구현과 대조해 설계 의도와 다르게 구현된 부분이 있는지 체크. 다르면 문서를 고치는 게 아니라 해당 ADR에 `Superseded`로 표시하고 실제와 다른 이유를 남긴다(§0 "대체된 결정은 지우지 말고 Superseded로 표시" 원칙).
    - (여유 있으면 스트레치, 필수 아님) 분산 락(Redlock)·read replica·Terraform·K8s.
