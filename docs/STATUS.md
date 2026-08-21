@@ -5,7 +5,9 @@
 > - **세션 시작 시**: 이 파일을 가장 먼저 읽고 "다음 할 일"부터 이어간다.
 > - **세션 끝 / 커밋 전**: 이 파일을 **덮어써서** 최신 상태로 갱신한다. (시간순 이력·삽질은 `DEVLOG.md`, 결정 근거는 `decisions/`)
 
-**마지막 업데이트:** 2026-08-21 (**배포 3단계 완료 — VM 실배포 + 브라우저 e2e까지 확인** — `https://app.15.164.234.208.sslip.io`(프론트)·`https://api.15.164.234.208.sslip.io`(백엔드) 라이브. Docker+Nginx+HTTPS(Let's Encrypt) 기동 후 curl 스모크 테스트에 이어, 사용자가 실제 브라우저로 게이트→Google 로그인→이벤트 예매(12매 확정)까지 진행해 스크린샷으로 확인 — SSE 실시간 판매 현황(게이지·퍼센티지 막대)도 정상 갱신됨. **배포 6단계 중 1~3번(Dockerize·CI/CD·VM+Nginx) 전부 완료, 다음은 4번(Prometheus+Grafana 관측)**. 이전 배포 2단계(CI/CD) 요약은 아래 유지)
+**마지막 업데이트:** 2026-08-21 (**배포 4단계 — Prometheus+Grafana 관측 인프라 구축·배포 완료(ADR 0020)** — apps/api에 `/metrics` 신규 노출(요청률·응답시간 히스토그램·confirm/payment 큐 적체, `@Public()`으로 게이트 우회), VM에 node-exporter·prometheus·grafana 3개 컨테이너 추가 기동, `https://grafana.15.164.234.208.sslip.io`(Nginx+HTTPS) 라이브. 배포 중 RAM 1GB VM에서 Grafana가 부팅만으로 메모리 상한(200m)의 99.95%를 소진하는 실측 문제 발견 → 300m으로 상향 + 스왑 1GB 신규 추가로 완화. Prometheus 타겟 3개(api·node·prometheus 자신) 전부 `up` 확인. **아직 실제 대시보드 패널(요청률/p95/에러율/큐 적체)은 미구성 — 다음 세션에서 이어서.** 이전 배포 3단계(VM+Nginx) 요약은 아래 유지)
+
+**이전 업데이트 (2026-08-21, 배포 3단계):** (**배포 3단계 완료 — VM 실배포 + 브라우저 e2e까지 확인** — `https://app.15.164.234.208.sslip.io`(프론트)·`https://api.15.164.234.208.sslip.io`(백엔드) 라이브. Docker+Nginx+HTTPS(Let's Encrypt) 기동 후 curl 스모크 테스트에 이어, 사용자가 실제 브라우저로 게이트→Google 로그인→이벤트 예매(12매 확정)까지 진행해 스크린샷으로 확인 — SSE 실시간 판매 현황(게이지·퍼센티지 막대)도 정상 갱신됨. **배포 6단계 중 1~3번(Dockerize·CI/CD·VM+Nginx) 전부 완료, 다음은 4번(Prometheus+Grafana 관측)**. 이전 배포 2단계(CI/CD) 요약은 아래 유지)
 
 **이전 업데이트 (2026-08-21, 배포 2단계):** (**배포 2단계 — CI/CD(GitHub Actions) 구축 완료 + 실사용 중 대기열 순번 버그 발견·수정** — `.github/workflows/ci.yml`(push/PR마다 api는 postgres/redis 서비스 컨테이너로 jest까지, web은 lint+vitest+build) · `cd.yml`(수동 트리거로 GHCR에 이미지 push, VM 배포 job은 3번 작업 후 추가 예정) 신규 작성 + 실행 검증 완료(Actions 탭에서 둘 다 그린, GHCR 패키지 2개 공개 전환 확인). 그 과정에서 `ci.yml` 첫 실행이 `queue.service.spec.ts` 1건을 실패시켜 **진짜 버그**를 발견 — 대기열 순번(ZSet score)을 `Date.now()`(밀리초)로 매기다 보니 두 `join()`이 같은 밀리초에 끝나면 동점이 나고 Redis가 동점을 멤버 문자열 사전순으로 정렬해 나중에 온 사람이 먼저 온 사람보다 앞 순번을 받는 문제였음. 로컬은 Redis 왕복 지연 덕에 우연히 안 겹쳤을 뿐, 실제 선착순 트래픽이 몰릴 때도 재현 가능한 공정성 버그로 판단해 Redis `INCR` 기반 단조 증가 시퀀스로 교체(동점 구조적으로 불가능해짐). API 87/87 재검증. **다음은 3. VM 배포 + Nginx**)
 
@@ -238,7 +240,7 @@
    1. ✅ ~~**Dockerize**~~ — `apps/api`/`apps/web` 멀티스테이지 빌드, 로컬 검증 완료(2026-08-20).
    2. ✅ ~~**CI/CD(GitHub Actions)**~~ — `ci.yml`(lint/test 자동)·`cd.yml`(수동, 이미지 빌드+GHCR push) 작성·실행 검증 완료(2026-08-21). VM pull&재기동 job은 3번 완료 후 추가.
    3. ✅ ~~**VM 배포 + Nginx 리버스 프록시**~~ — Docker+compose+Nginx+HTTPS(Let's Encrypt) 기동 + 브라우저 e2e(게이트→Google 로그인→예매→SSE 실시간 대시보드) 사용자 직접 확인까지 완료(2026-08-21). `https://app.15.164.234.208.sslip.io` / `https://api.15.164.234.208.sslip.io` 라이브. **배포 파이프라인(1~3번) 전체 완성.**
-   4. **← 다음: 관측(Prometheus+Grafana)** — 요청률/p95/에러율/큐 적체 대시보드. 미착수.
+   4. **← 다음: 관측(Prometheus+Grafana) 대시보드 패널 구성** — 인프라·지표 배포는 완료(ADR 0020, 2026-08-21). `https://grafana.15.164.234.208.sslip.io` 로그인 후, 요청률/p95/에러율/큐 적체 패널을 실제로 만드는 것만 남음(PromQL 작성 포함).
    5. **최종 k6 부하 리포트** — `apps/api/test/load/`엔 W2 락 비교용 스크립트만 있음(그건 §8 "before/after" 문서로 이미 남김, `docs/perf/`). 전체 파이프라인(HELD+큐+SSE) 완성 후의 최종 부하 리포트는 별도로 아직 없음.
    6. **README + 회고(트러블슈팅 기록)** — 미작성.
    7. **(필수) ADR·설계 문서 최신화** — `docs/decisions/` 전체를 실제 구현과 대조해 설계 의도와 다르게 구현된 부분이 있는지 체크. 다르면 문서를 고치는 게 아니라 해당 ADR에 `Superseded`로 표시하고 실제와 다른 이유를 남긴다(§0 "대체된 결정은 지우지 말고 Superseded로 표시" 원칙).
@@ -253,8 +255,9 @@
 - **키 페어**: `sunchak-key` — **`.pem` 파일은 gitignore 대상이라 git에 없음. 다른 기기에서 접속하려면 AWS 콘솔에서 새 키 페어를 발급해 기존 인스턴스에 연결하거나(재부팅 필요), 이 기기의 `.pem` 파일을 안전한 방법으로 직접 옮겨야 함.**
 - **접속**: `ssh -i <키경로>/sunchak-key.pem ubuntu@15.164.234.208`
 - **보안 그룹**: SSH(22, 내 IP)·HTTP(80, Anywhere-IPv4)·HTTPS(443, Anywhere-IPv4) 인바운드 허용됨.
-- **현재 상태(2026-08-21)**: Docker Engine·Nginx·Let's Encrypt·앱(api/web/redis 컨테이너) 전부 배포 완료. **라이브 URL**: `https://app.15.164.234.208.sslip.io`(프론트) / `https://api.15.164.234.208.sslip.io`(백엔드). VM 재배포 절차: 로컬에서 `cd.yml` 수동 실행(GHCR에 새 이미지 push) → VM에서 `cd ~/sunchak && docker compose pull && docker compose up -d`.
-- **VM의 비밀값 파일**: `~/sunchak/api.env`(git 미포함, 권한 600) — 이 기기가 아닌 다른 기기에서 재배포하려면 이 값들을 다시 채워야 함(위 "다음 할 일" 안내 참고).
+- **현재 상태(2026-08-21)**: Docker Engine·Nginx·Let's Encrypt·앱(api/web/redis) + 관측(node-exporter/prometheus/grafana, ADR 0020) 전부 배포 완료. **라이브 URL**: `https://app.15.164.234.208.sslip.io`(프론트) / `https://api.15.164.234.208.sslip.io`(백엔드) / `https://grafana.15.164.234.208.sslip.io`(관측 대시보드). VM 재배포 절차: 로컬에서 `cd.yml` 수동 실행(GHCR에 새 이미지 push) → VM에서 `cd ~/sunchak && docker compose pull && docker compose up -d`.
+- **VM의 비밀값 파일**: `~/sunchak/api.env`(git 미포함, 권한 600), `~/sunchak/grafana.env`(admin 계정 비밀번호, 마찬가지로 git 미포함·권한 600) — 이 기기가 아닌 다른 기기에서 재배포하려면 이 값들을 다시 채워야 함(위 "다음 할 일" 안내 참고).
+- **스왑**: VM에 스왑 1GB 신규 추가(`/swapfile`, `/etc/fstab` 등록 — 재부팅해도 유지). RAM 1GB 박스에 컨테이너 6개(redis/api/web/node-exporter/prometheus/grafana)가 도는 안전망(ADR 0020 배경 참고). Grafana `mem_limit`은 실측 후 200m→300m으로 상향.
 - **VM을 재구성해야 할 경우(IP 변경 등)**: ① Docker Engine 설치(`curl -fsSL https://get.docker.com | sudo sh`) ② `infra/docker-compose.prod.yml`을 `~/sunchak/docker-compose.yml`로 올리고 `api.env` 재작성 ③ `infra/nginx/*.conf`를 `/etc/nginx/sites-available/`에 배치 후 `sites-enabled`에 심볼릭 링크·기본 `default` 사이트 제거 ④ `sudo certbot --nginx -d app.<새IP>.sslip.io -d api.<새IP>.sslip.io --redirect`.
 - **AWS 프리 티어**: 12개월 한시(Oracle/GCP의 "영구 무료"와 다름) — 만료일은 콘솔 우측 상단 계정명 → "계정" → 계정 생성일 + 12개월로 계산.
 

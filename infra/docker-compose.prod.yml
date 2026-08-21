@@ -74,7 +74,10 @@ services:
     image: grafana/grafana:latest
     container_name: sunchak-grafana
     restart: unless-stopped
-    mem_limit: 200m
+    # 200m으로 뒀더니 부팅 직후부터 상한의 99.95%를 써버려 실사용 시 OOM이
+    # 확실시됨(2026-08-21 실측) — Grafana OSS 기본 베이스라인이 생각보다
+    # 높아서 300m으로 상향.
+    mem_limit: 300m
     env_file: ./grafana.env
     ports:
       - "127.0.0.1:3003:3000"
