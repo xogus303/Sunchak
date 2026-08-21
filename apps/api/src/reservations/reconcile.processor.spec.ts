@@ -7,7 +7,12 @@ import { ReservationStatus } from '@prisma/client';
 import { ReconcileProcessor } from './reconcile.processor';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
-import { RECONCILE_QUEUE } from './reservations.constants';
+import {
+  HELD_ACTIVITY_KEY,
+  HELD_ACTIVITY_TTL_MS,
+  RECONCILE_FALLBACK_KEY,
+  RECONCILE_QUEUE,
+} from './reservations.constants';
 
 // '총재고 − (HELD+CONFIRMED)'가 핵심이라 실제 DB가 있어야 의미 있게 검증된다.
 // process()를 직접 호출해 반복 타이머(1분)를 기다리지 않는다.
@@ -74,10 +79,16 @@ describe('ReconcileProcessor (통합 — Redis 재고 재구성)', () => {
       },
     });
     eventId = event.id;
+
+    // ADR 0021 — reconcile이 이제 이 플래그를 보고 Postgres 접근 여부를
+    // 판단한다. 이 스펙은 재계산 로직 자체(스킵 여부가 아니라)를 검증하는
+    // 게 목적이라, 모든 테스트를 "방금 활동이 있었던" 상태로 시작시킨다.
+    await redis.del(HELD_ACTIVITY_KEY, RECONCILE_FALLBACK_KEY);
+    await redis.set(HELD_ACTIVITY_KEY, '1', 'PX', HELD_ACTIVITY_TTL_MS);
   });
 
   afterEach(async () => {
-    await redis.del(stockKey());
+    await redis.del(stockKey(), HELD_ACTIVITY_KEY, RECONCILE_FALLBACK_KEY);
   });
 
   const createReservation = (quantity: number, status: ReservationStatus) =>
@@ -128,5 +139,31 @@ describe('ReconcileProcessor (통합 — Redis 재고 재구성)', () => {
     await processor.process({} as Job);
 
     await expect(readStock()).resolves.toBe(4); // 5 − 1(EXPIRED·CANCELLED는 안 셈)
+  });
+
+  // ADR 0021 — 활동 플래그가 없을 때의 스킵/보험 로직 자체를 검증.
+  // beforeEach가 세워둔 활동 플래그를 각 테스트 시작 시 다시 지워
+  // "활동 신호가 없는 상태"를 재현한다.
+  it('활동 플래그가 없고 보험 주기도 아직이면 Postgres를 건드리지 않는다', async () => {
+    await redis.del(HELD_ACTIVITY_KEY);
+    await redis.set(stockKey(), '999'); // 어긋난 값(정상이면 reconcile이 고쳐야 함)
+    await createReservation(1, ReservationStatus.HELD);
+    // 보험을 이미 써버린 상태를 흉내.
+    await redis.set(RECONCILE_FALLBACK_KEY, '1', 'PX', 24 * 60 * 60 * 1000);
+
+    await processor.process({} as Job);
+
+    await expect(readStock()).resolves.toBe(999); // 안 고침 — Postgres 자체를 안 감
+  });
+
+  it('활동 플래그가 없어도 보험 주기가 지났으면 Postgres를 확인한다', async () => {
+    await redis.del(HELD_ACTIVITY_KEY);
+    await redis.set(stockKey(), '999');
+    await createReservation(1, ReservationStatus.HELD);
+    // RECONCILE_FALLBACK_KEY를 안 세팅 = "보험 주기가 지났다"와 동일한 상태.
+
+    await processor.process({} as Job);
+
+    await expect(readStock()).resolves.toBe(4); // 5 − 1 = 4, 보험으로 정상 보정됨
   });
 });

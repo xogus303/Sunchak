@@ -7,7 +7,12 @@ import { ReservationStatus } from '@prisma/client';
 import { SweepProcessor } from './sweep.processor';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
-import { SWEEP_QUEUE } from './reservations.constants';
+import {
+  HELD_ACTIVITY_KEY,
+  HELD_ACTIVITY_TTL_MS,
+  SWEEP_FALLBACK_KEY,
+  SWEEP_QUEUE,
+} from './reservations.constants';
 
 // sweep의 핵심(원자적 UPDATE...RETURNING + Redis 보정)은 실제 DB·Redis가 있어야
 // 의미 있게 검증된다. process()를 직접 호출해 반복 타이머(30초)를 기다리지 않는다.
@@ -78,14 +83,22 @@ describe('SweepProcessor (통합 — TTL 만료 스윕)', () => {
       },
     });
     eventId = event.id;
+
+    // ADR 0021 — sweep이 이제 이 플래그를 보고 Postgres 접근 여부를 판단한다.
+    // 매 테스트를 "방금 활동이 있었던" 상태로 깨끗하게 시작시킨다(다른 스펙
+    // 파일이나 백그라운드 워커의 잔여 상태에 의존하지 않기 위해 먼저 지운다).
+    await redis.del(HELD_ACTIVITY_KEY, SWEEP_FALLBACK_KEY);
   });
 
   afterEach(async () => {
-    await redis.del(stockKey());
+    await redis.del(stockKey(), HELD_ACTIVITY_KEY, SWEEP_FALLBACK_KEY);
   });
 
-  const createHeld = (quantity: number, heldUntil: Date) =>
-    prisma.reservation.create({
+  // 실제로는 ReservationsService.createHeld()가 DB 기록과 함께 이 플래그를
+  // 세운다 — 테스트 헬퍼는 서비스를 안 거치고 DB에 직접 꽂으므로 그 신호도
+  // 직접 흉내 낸다(안 그러면 sweep이 "활동 없음"으로 판단해 건너뛴다).
+  const createHeld = async (quantity: number, heldUntil: Date) => {
+    const reservation = await prisma.reservation.create({
       data: {
         userId,
         eventId,
@@ -95,6 +108,9 @@ describe('SweepProcessor (통합 — TTL 만료 스윕)', () => {
         heldUntil,
       },
     });
+    await redis.set(HELD_ACTIVITY_KEY, '1', 'PX', HELD_ACTIVITY_TTL_MS);
+    return reservation;
+  };
 
   it('heldUntil이 지난 HELD를 EXPIRED로 바꾸고 Redis 재고를 quantity만큼 돌려준다', async () => {
     await seedStock(3); // 5장 중 2장은 이미 관문 통과로 차감된 상태를 흉내
@@ -137,5 +153,57 @@ describe('SweepProcessor (통합 — TTL 만료 스윕)', () => {
       where: { status: ReservationStatus.EXPIRED },
     });
     expect(count).toBe(2);
+  });
+
+  // ADR 0021 — 활동 플래그가 없을 때의 스킵/보험 로직 자체를 검증. 아래 두
+  // 테스트는 createHeld 헬퍼(플래그를 자동으로 세움)를 안 쓰고 DB에 직접
+  // 꽂아서, "활동 신호가 없는 상태"를 정확히 재현한다.
+  it('활동 플래그가 없고 보험 주기도 아직이면 Postgres를 건드리지 않는다', async () => {
+    await seedStock(3);
+    const past = new Date(Date.now() - 1000);
+    const reservation = await prisma.reservation.create({
+      data: {
+        userId,
+        eventId,
+        quantity: 2,
+        idempotencyKey: randomUUID(),
+        status: ReservationStatus.HELD,
+        heldUntil: past,
+      },
+    });
+    // 보험을 이미 써버린 상태를 흉내(방금 막 한 번 돈 것처럼).
+    await redis.set(SWEEP_FALLBACK_KEY, '1', 'PX', 24 * 60 * 60 * 1000);
+
+    await processor.process({} as Job);
+
+    const untouched = await prisma.reservation.findUniqueOrThrow({
+      where: { id: reservation.id },
+    });
+    expect(untouched.status).toBe(ReservationStatus.HELD); // 건드리지 않음
+    await expect(readStock()).resolves.toBe(3); // 변화 없음
+  });
+
+  it('활동 플래그가 없어도 보험 주기가 지났으면 Postgres를 확인한다', async () => {
+    await seedStock(3);
+    const past = new Date(Date.now() - 1000);
+    const reservation = await prisma.reservation.create({
+      data: {
+        userId,
+        eventId,
+        quantity: 2,
+        idempotencyKey: randomUUID(),
+        status: ReservationStatus.HELD,
+        heldUntil: past,
+      },
+    });
+    // SWEEP_FALLBACK_KEY를 안 세팅 = "보험 주기가 지났다"와 동일한 상태.
+
+    await processor.process({} as Job);
+
+    const updated = await prisma.reservation.findUniqueOrThrow({
+      where: { id: reservation.id },
+    });
+    expect(updated.status).toBe(ReservationStatus.EXPIRED); // 보험으로 잡힘
+    await expect(readStock()).resolves.toBe(5); // 3 + 2 = 5
   });
 });

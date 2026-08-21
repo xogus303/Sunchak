@@ -3,7 +3,13 @@ import { Logger, OnModuleInit } from '@nestjs/common';
 import { Job, Queue } from 'bullmq';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
-import { SWEEP_INTERVAL_MS, SWEEP_QUEUE } from './reservations.constants';
+import {
+  HELD_ACTIVITY_KEY,
+  SWEEP_FALLBACK_INTERVAL_MS,
+  SWEEP_FALLBACK_KEY,
+  SWEEP_INTERVAL_MS,
+  SWEEP_QUEUE,
+} from './reservations.constants';
 
 interface ExpiredRow {
   id: number;
@@ -48,6 +54,24 @@ export class SweepProcessor extends WorkerHost implements OnModuleInit {
   }
 
   async process(_job: Job): Promise<void> {
+    // ADR 0021 — 최근 활동이 없으면(유휴) 하루 1번 보험 확인 때만 Postgres에
+    // 접근한다. Neon은 5분간 요청이 없어야 잠드는데, 이 틱이 5초마다 무조건
+    // Postgres를 건드리면 그 5분이 절대 안 만들어진다. 활동 중엔(플래그 존재)
+    // 지금까지와 완전히 동일하게 동작 — 이 분기는 순수하게 유휴 시간의 낭비만 없앤다.
+    const active = await this.redis.exists(HELD_ACTIVITY_KEY);
+    if (!active) {
+      const dueForFallback = await this.redis.set(
+        SWEEP_FALLBACK_KEY,
+        '1',
+        'PX',
+        SWEEP_FALLBACK_INTERVAL_MS,
+        'NX',
+      );
+      if (!dueForFallback) {
+        return;
+      }
+    }
+
     const expired = await this.prisma.$queryRaw<ExpiredRow[]>`
       UPDATE reservations
       SET status = 'EXPIRED'

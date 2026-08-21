@@ -13,6 +13,7 @@ import { Prisma, ReservationStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
 import { ReservationEventsService } from './reservation-events.service';
+import { HELD_ACTIVITY_KEY, HELD_ACTIVITY_TTL_MS } from './reservations.constants';
 
 // W2 동시성 비교용 — 예매 재고 차감을 처리하는 5가지 전략.
 // + W3 최종 흐름(held): 관문(DECRBY) + HELD 선기록 + 멱등성 보상.
@@ -243,6 +244,10 @@ export class ReservationsService {
           heldUntil: new Date(Date.now() + this.HELD_TTL_MS),
         },
       });
+
+      // ADR 0021 — "최근 활동 있었음" 신호. sweep·reconcile이 유휴 시 Postgres
+      // 접근을 건너뛸지 판단하는 근거로 쓴다(TTL 90초, 정확한 근거는 constants 주석 참고).
+      await this.redis.set(HELD_ACTIVITY_KEY, '1', 'PX', HELD_ACTIVITY_TTL_MS);
 
       return reservation;
     } catch (e) {

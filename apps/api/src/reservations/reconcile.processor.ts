@@ -4,7 +4,13 @@ import { Job, Queue } from 'bullmq';
 import { ReservationStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
-import { RECONCILE_INTERVAL_MS, RECONCILE_QUEUE } from './reservations.constants';
+import {
+  HELD_ACTIVITY_KEY,
+  RECONCILE_FALLBACK_INTERVAL_MS,
+  RECONCILE_FALLBACK_KEY,
+  RECONCILE_INTERVAL_MS,
+  RECONCILE_QUEUE,
+} from './reservations.constants';
 
 /**
  * Redis 재고 재구성 — remaining = 총재고 − (HELD + CONFIRMED)를 주기적으로 다시
@@ -38,6 +44,23 @@ export class ReconcileProcessor extends WorkerHost implements OnModuleInit {
   }
 
   async process(_job: Job): Promise<void> {
+    // ADR 0021 — sweep과 같은 이유·같은 신호. 플래그 TTL(90초)이 이 워커의
+    // 확인 주기(1분)+30초 여유로 잡혀 있어, 예매 발생 직후 이 워커의 바로
+    // 다음 틱은 반드시 플래그를 살아있는 채로 만난다(수학적으로 보장).
+    const active = await this.redis.exists(HELD_ACTIVITY_KEY);
+    if (!active) {
+      const dueForFallback = await this.redis.set(
+        RECONCILE_FALLBACK_KEY,
+        '1',
+        'PX',
+        RECONCILE_FALLBACK_INTERVAL_MS,
+        'NX',
+      );
+      if (!dueForFallback) {
+        return;
+      }
+    }
+
     const inventories = await this.prisma.inventory.findMany({
       select: { eventId: true, totalQty: true },
     });
