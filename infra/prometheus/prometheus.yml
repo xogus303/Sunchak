@@ -1,0 +1,22 @@
+# Prometheus가 누구를, 얼마나 자주 긁을지(scrape) 정하는 설정.
+# 대상 주소는 컨테이너 이름(Docker 네트워크의 DNS)을 그대로 쓴다 — 같은
+# docker-compose 네트워크 안에서는 서비스 이름이 곧 호스트명이 된다.
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  # apps/api가 노출하는 지표(요청률/응답시간 히스토그램/큐 적체).
+  # 경로는 기본값 '/metrics' 그대로.
+  - job_name: sunchak-api
+    static_configs:
+      - targets: ['api:3001']
+
+  # VM 호스트 자체의 CPU/메모리/디스크 — node-exporter가 노출.
+  - job_name: node
+    static_configs:
+      - targets: ['node-exporter:9100']
+
+  # Prometheus 자기 자신의 상태(스크레이프 성공률 등)도 표준적으로 함께 수집한다.
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']

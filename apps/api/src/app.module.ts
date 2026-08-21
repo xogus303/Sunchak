@@ -9,6 +9,7 @@ import { EventsModule } from './events/events.module';
 import { ReservationsModule } from './reservations/reservations.module';
 import { DemoModule } from './demo/demo.module';
 import { DemoGateGuard } from './demo/guards/demo-gate.guard';
+import { MetricsModule } from './metrics/metrics.module';
 import { AppController } from './app.controller';
 
 @Module({
@@ -39,6 +40,7 @@ import { AppController } from './app.controller';
     EventsModule,
     ReservationsModule,
     DemoModule,
+    MetricsModule,
   ],
   controllers: [AppController],
   providers: [

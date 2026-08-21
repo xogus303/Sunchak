@@ -31,9 +31,64 @@ services:
       - "127.0.0.1:3000:3000"
     networks: [sunchak]
 
+  # VM 호스트 자체의 CPU/메모리/디스크 지표를 노출한다. 컨테이너 안에서 돌지만
+  # 호스트의 /proc·/sys를 읽기 전용으로 마운트해 "컨테이너 자신"이 아니라
+  # "VM 전체"를 관측한다. RAM 1GB짜리 t3.micro라 mem_limit으로 상한을 둔다.
+  node-exporter:
+    image: prom/node-exporter:latest
+    container_name: sunchak-node-exporter
+    restart: unless-stopped
+    pid: host
+    mem_limit: 64m
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--path.rootfs=/rootfs'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+    networks: [sunchak]
+
+  # api(/metrics)·node-exporter를 주기적으로 긁어(scrape) 시계열로 저장.
+  # retention.time=7d — RAM 1GB 박스라 데이터를 무한정 안 쌓고 일주일치만 보존.
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: sunchak-prometheus
+    restart: unless-stopped
+    mem_limit: 200m
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.retention.time=7d'
+    depends_on: [api, node-exporter]
+    networks: [sunchak]
+
+  # Prometheus에 쌓인 지표를 그래프로 보여주는 대시보드. 컨테이너 기본 포트가
+  # web(3000)과 겹쳐서 호스트 쪽만 3003으로 옮긴다(컨테이너 내부는 그대로 3000).
+  # 관리자 계정 비밀번호는 grafana.env(VM에만 존재, git 미포함)로 주입한다.
+  grafana:
+    image: grafana/grafana:latest
+    container_name: sunchak-grafana
+    restart: unless-stopped
+    mem_limit: 200m
+    env_file: ./grafana.env
+    ports:
+      - "127.0.0.1:3003:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on: [prometheus]
+    networks: [sunchak]
+
 networks:
   sunchak:
     driver: bridge
 
 volumes:
   redis-data:
+  prometheus-data:
+  grafana-data:

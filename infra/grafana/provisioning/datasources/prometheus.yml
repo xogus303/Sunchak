@@ -1,0 +1,12 @@
+# Grafana가 뜰 때마다 이 파일을 읽어 Prometheus를 데이터소스로 자동 등록한다.
+# 컨테이너를 껐다 켜도(볼륨을 안 지우는 한) 매번 "데이터소스 추가"를 수동으로
+# 반복할 필요가 없다 — Grafana 용어로 이런 방식을 "프로비저닝"이라 부른다.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
