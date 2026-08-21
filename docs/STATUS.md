@@ -5,7 +5,9 @@
 > - **세션 시작 시**: 이 파일을 가장 먼저 읽고 "다음 할 일"부터 이어간다.
 > - **세션 끝 / 커밋 전**: 이 파일을 **덮어써서** 최신 상태로 갱신한다. (시간순 이력·삽질은 `DEVLOG.md`, 결정 근거는 `decisions/`)
 
-**마지막 업데이트:** 2026-08-21 (**배포 4단계 — Prometheus+Grafana 관측 인프라 구축·배포 완료(ADR 0020)** — apps/api에 `/metrics` 신규 노출(요청률·응답시간 히스토그램·confirm/payment 큐 적체, `@Public()`으로 게이트 우회), VM에 node-exporter·prometheus·grafana 3개 컨테이너 추가 기동, `https://grafana.15.164.234.208.sslip.io`(Nginx+HTTPS) 라이브. 배포 중 RAM 1GB VM에서 Grafana가 부팅만으로 메모리 상한(200m)의 99.95%를 소진하는 실측 문제 발견 → 300m으로 상향 + 스왑 1GB 신규 추가로 완화. Prometheus 타겟 3개(api·node·prometheus 자신) 전부 `up` 확인. **대시보드 패널 4개(요청률/p95/에러율/큐 적체)도 사용자가 Grafana UI에서 직접 PromQL을 작성해 완성**(`histogram_quantile`·`rate`·라벨 필터 등 학습). **배포 6단계 중 1~4번 전부 완료, 다음은 5번(최종 k6 부하 리포트).** 이전 배포 3단계(VM+Nginx) 요약은 아래 유지)
+**마지막 업데이트:** 2026-08-21 (**배포 4단계 — Prometheus+Grafana 관측 인프라 구축·배포 완료(ADR 0020)** — apps/api에 `/metrics` 신규 노출(요청률·응답시간 히스토그램·confirm/payment 큐 적체, `@Public()`으로 게이트 우회), VM에 node-exporter·prometheus·grafana 3개 컨테이너 추가 기동, `https://grafana.15.164.234.208.sslip.io`(Nginx+HTTPS) 라이브. 배포 중 RAM 1GB VM에서 Grafana가 부팅만으로 메모리 상한(200m)의 99.95%를 소진하는 실측 문제 발견 → 300m으로 상향 + 스왑 1GB 신규 추가로 완화. Prometheus 타겟 3개(api·node·prometheus 자신) 전부 `up` 확인. **대시보드 패널 4개(요청률/p95/에러율/큐 적체)도 사용자가 Grafana UI에서 직접 PromQL을 작성해 완성**(`histogram_quantile`·`rate`·라벨 필터 등 학습). **배포 6단계 중 1~5번 전부 완료, 다음은 6번(README+회고).** 이전 배포 3단계(VM+Nginx) 요약은 아래 유지)
+
+**이전 업데이트 (2026-08-21, 배포 5단계):** (**최종 k6 부하 리포트 완료** — 대기열→HELD→결제 전체 파이프라인을 처음으로 k6로 실측(`full_pipeline_load.js`). 로컬(150 VU, 재고 100 — 입장허가 126·재고소진 24)과 배포 VM(8 VU, VM 자원 보호로 소규모)을 나란히 측정, 체크 성공률 둘 다 100%. VM 개별 요청 지연이 로컬보다 6~8배 높게 나왔는데(p95 로컬 110ms vs VM 844ms) 원인을 Neon DB 네트워크 홉·실제 인터넷 왕복·t3.micro 사양 세 가지로 설명 가능함을 확인(원인불명 이상 지연 없음). VM 테스트 직후 Prometheus 질의로 이 부하가 실제로 잡혔는지도 검증(오늘 만든 관측 파이프라인의 첫 실전 확인). 결과 문서 `docs/perf/2026-08-21-full-pipeline-load.md`. VM에 만든 테스트 계정·이벤트는 정리 완료)
 
 **이전 업데이트 (2026-08-21, 배포 3단계):** (**배포 3단계 완료 — VM 실배포 + 브라우저 e2e까지 확인** — `https://app.15.164.234.208.sslip.io`(프론트)·`https://api.15.164.234.208.sslip.io`(백엔드) 라이브. Docker+Nginx+HTTPS(Let's Encrypt) 기동 후 curl 스모크 테스트에 이어, 사용자가 실제 브라우저로 게이트→Google 로그인→이벤트 예매(12매 확정)까지 진행해 스크린샷으로 확인 — SSE 실시간 판매 현황(게이지·퍼센티지 막대)도 정상 갱신됨. **배포 6단계 중 1~3번(Dockerize·CI/CD·VM+Nginx) 전부 완료, 다음은 4번(Prometheus+Grafana 관측)**. 이전 배포 2단계(CI/CD) 요약은 아래 유지)
 
@@ -241,8 +243,8 @@
    2. ✅ ~~**CI/CD(GitHub Actions)**~~ — `ci.yml`(lint/test 자동)·`cd.yml`(수동, 이미지 빌드+GHCR push) 작성·실행 검증 완료(2026-08-21). VM pull&재기동 job은 3번 완료 후 추가.
    3. ✅ ~~**VM 배포 + Nginx 리버스 프록시**~~ — Docker+compose+Nginx+HTTPS(Let's Encrypt) 기동 + 브라우저 e2e(게이트→Google 로그인→예매→SSE 실시간 대시보드) 사용자 직접 확인까지 완료(2026-08-21). `https://app.15.164.234.208.sslip.io` / `https://api.15.164.234.208.sslip.io` 라이브. **배포 파이프라인(1~3번) 전체 완성.**
    4. ✅ ~~**관측(Prometheus+Grafana)**~~ — 인프라·지표 배포(ADR 0020) + 대시보드 패널 4개(요청률/p95/에러율/큐 적체) 사용자가 직접 Grafana UI에서 PromQL 작성해 완성(2026-08-21). `https://grafana.15.164.234.208.sslip.io`.
-   5. **← 다음: 최종 k6 부하 리포트** — 전체 파이프라인(게이트→대기열→HELD→결제→확정→SSE) 완성 후의 부하 테스트. `apps/api/test/load/`엔 W2 락 비교용 스크립트만 있음(그건 §8 "before/after" 문서로 이미 남김, `docs/perf/`). 지금 막 붙인 Grafana로 실시간 관찰하며 돌리면 좋은 검증 기회.
-   6. **README + 회고(트러블슈팅 기록)** — 미작성.
+   5. ✅ ~~**최종 k6 부하 리포트**~~ — `full_pipeline_load.js`/`full_pipeline_bench.sh` 신규 작성(대기열→HELD→결제 전체 흐름). 로컬(150 VU)·배포 VM(8 VU, 자원 보호로 소규모) 둘 다 실측, 결과 `docs/perf/2026-08-21-full-pipeline-load.md`. 체크 성공률 100%, VM p99 개별 요청 1초 미만. VM 테스트 후 생성한 테스트 계정·이벤트는 정리 완료(2026-08-21).
+   6. **← 다음: README + 회고(트러블슈팅 기록)** — 미작성.
    7. **(필수) ADR·설계 문서 최신화** — `docs/decisions/` 전체를 실제 구현과 대조해 설계 의도와 다르게 구현된 부분이 있는지 체크. 다르면 문서를 고치는 게 아니라 해당 ADR에 `Superseded`로 표시하고 실제와 다른 이유를 남긴다(§0 "대체된 결정은 지우지 말고 Superseded로 표시" 원칙).
    - (여유 있으면 스트레치, 필수 아님) 분산 락(Redlock)·read replica·Terraform·K8s.
 3. (선택) `simulateLoad()`가 쿨다운을 데모 이벤트 확인보다 먼저 거는 순서 정리(위 축 B-1/B-2 "발견(보류)" 참고).
@@ -286,6 +288,7 @@
   - **⚠️ `lsof -ti:3001 -sTCP:LISTEN | xargs kill`로는 안 지워질 수 있다**: `pnpm start:dev`는 래퍼 프로세스고, 실제 서버(BullMQ 워커 포함)는 그 자식인 `nest.js start --watch`다. 래퍼(또는 포트 점유자)만 죽이면 이 자식이 **고아 프로세스로 남아 포트 없이도 Redis에 계속 연결된 채** job을 계속 가로챈다(이번 세션에 5개나 쌓였었다 — DB는 맞게 바뀌는데 SSE 이벤트만 안 오는 걸로 원인 진단에 시간이 걸림). **올바른 정리**: `ps aux | grep "nest.js start" | grep -v grep | awk '{print $2}' | xargs -r kill -9` (포트 점유자도 함께: `lsof -ti:3001 | xargs -r kill -9`).
 - ⚠️ **`pnpm exec`가 막히면**: bullmq의 선택적 네이티브 빌드(`msgpackr-extract`)가 스킵돼 pnpm의 실행 전 deps 점검이 실패할 수 있다. 우회 = 바이너리 직접 호출 `./node_modules/.bin/jest`, `./node_modules/.bin/tsc --noEmit`. (기능 무해 — JS로 폴백. 원하면 `pnpm approve-builds`로 승인.)
 - W2 벤치: 서버(`pnpm start:dev`)+로컬 PG 기동, admin 계정 존재 확인 후 `ADMIN_PASSWORD=... bash apps/api/test/load/bench.sh`.
+- 최종 파이프라인 벤치(대기열→HELD→결제, 2026-08-21 신규): k6 설치 필요(`brew install k6`). 서버 기동 + admin 계정(role=ADMIN) 존재 확인 후 `GATE_PASSWORD=... ADMIN_EMAIL=... ADMIN_PASSWORD=... VUS=150 STOCK=100 bash apps/api/test/load/full_pipeline_bench.sh`. `DEMO_GATE_PASSWORD` 미설정 로컬이면 `GATE_PASSWORD=""`로 생략 가능.
 
 ## 🖥️ 다른 기기에서 이어받는 법 (W2/W3는 로컬 DB!)
 1. `git pull`
