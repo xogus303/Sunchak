@@ -28,3 +28,9 @@
 - **새 GitHub Secrets 4개 필요**(사람이 웹에서 직접 등록 — 자동화 불가): `VM_HOST`, `VM_USERNAME`, `VM_SSH_KEY`, `VM_HOST_FINGERPRINT`.
 - 앞으로 `main`에 정상적으로 merge/push되는 모든 커밋이 자동으로 프로덕션까지 나간다 — PR 리뷰나 로컬 검증 없이 바로 push하는 습관은 이제 곧바로 배포로 이어진다는 뜻이라 더 신중해야 한다.
 - 여전히 사람이 해야 하는 것: 마이그레이션이 필요한 스키마 변경처럼 위험도가 높은 커밋은 push 전에 로컬에서 `prisma migrate deploy`를 미리 검증하는 습관이 이전보다 더 중요해짐(자동 배포가 그 검증을 대신 안 해주므로).
+
+## 개정 이력 — 실제 적용 중 발견한 삽질 2건 (2026-08-22)
+
+- **VM 보안 그룹이 SSH를 "내 IP"로만 허용해 GitHub Actions 러너 접속이 막혀 있었다**(배포 초기 설정, ADR 0019 시점부터 있던 값). GitHub 호스팅 러너는 고정 IP가 아니라 사실상 막을 방법이 마땅치 않아, "Anywhere-IPv4"로 개방(사용자 확인 후 결정) — 이미 HTTP/HTTPS는 Anywhere였으니 이 프로젝트의 기존 위험 수용 수준과 결이 같다고 판단.
+- **호스트 키 지문 불일치로 SSH 핸드셰이크 실패**(`ssh: host key fingerprint mismatch`). 원인 — VM엔 RSA·ECDSA·ED25519 세 종류의 호스트 키가 다 있는데, `appleboy/ssh-action`이 쓰는 golang `x/crypto/ssh`의 기본 `HostKeyAlgorithms` 우선순위(비인증서 기준: ECDSA → RSA → ED25519 순)상 **ED25519가 가장 낮은 우선순위**라 실제로는 ECDSA 키가 협상됐다. 처음엔 (OpenSSH CLI 습관대로) ED25519 지문을 등록했다가 실패 — ECDSA 지문(`ssh-keygen -l -f /etc/ssh/ssh_host_ecdsa_key.pub`)으로 교체해 해결. **교훈**: 호스트에 여러 키 타입이 있으면, 클라이언트(사람이 쓰는 OpenSSH vs 라이브러리)마다 실제로 협상하는 키가 다를 수 있다 — "아무 키 하나의 지문"이 아니라 "그 클라이언트가 실제로 쓸 키"의 지문을 확인해야 한다.
+- 두 문제 다 해결 후 `cd.yml` 자동 실행으로 ADR 0021 코드가 VM에 정상 반영됨을 확인(헬스체크·이미지 타임스탬프로 검증).

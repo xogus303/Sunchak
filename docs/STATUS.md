@@ -5,7 +5,9 @@
 > - **세션 시작 시**: 이 파일을 가장 먼저 읽고 "다음 할 일"부터 이어간다.
 > - **세션 끝 / 커밋 전**: 이 파일을 **덮어써서** 최신 상태로 갱신한다. (시간순 이력·삽질은 `DEVLOG.md`, 결정 근거는 `decisions/`)
 
-**마지막 업데이트:** 2026-08-22 (**sweep·reconcile의 Neon 상시 접근 제거(ADR 0021), 로컬 구현·검증 완료** — 방문자 유무와 무관하게 5초/1분 주기로 상시 Postgres(Neon)를 깨우던 두 워커를 "최근 활동 플래그(TTL 90초, `createHeld` 성공 시 세팅) + 하루 1번 보험 확인" 구조로 전환. 활동 중엔 지금까지와 완전히 동일하게 동작(체감 무변화), 유휴 시에만 Postgres 접근이 하루 단위로 줄어 Neon CU-hour 소모가 이론상 월 180시간대에서 1시간 미만으로 감소 추정. 구현 중 기존 sweep/reconcile 통합 테스트가 DB 직접 삽입 헬퍼를 써서 새 플래그를 못 만나 깨졌던 것을 발견·수정(원인: 활동 신호 없이 테스트하던 방식이 새 스킵 로직과 안 맞았음), 스킵/보험 로직 자체 검증 테스트 4건 신규 추가(API 87→91). 로컬 서버로 실제 예매→sweep 만료(EXPIRED)→재고 원복까지 수동 검증 완료. **아직 VM에는 미배포** — 다음 세션에서 `cd.yml` 실행 후 반영 필요. **선행 배경**: 배포 6단계(Dockerize·CI/CD·VM+Nginx·관측·k6 부하·README+ADR) 전부 완료된 뒤(2026-08-21), ADR 0016/0017 백로그 논의 중 "Neon CU-hour가 실제로 문제될지" 질문에서 시작된 작업 — 이전 배포 4단계(Prometheus+Grafana) 요약은 아래 유지)
+**마지막 업데이트:** 2026-08-22 (**CD 완전 자동화(ADR 0022) 구축 + ADR 0021 VM 배포까지 완료** — `main` push → `ci.yml` 통과 → `cd.yml`이 자동으로 이미지 빌드+GHCR push+VM SSH 반영까지 사람 개입 없이 끝나는 구조로 전환(기존엔 CI/CD 구축 초기부터 "VM 배포 job은 나중에 추가 예정"이라고 남겨두고 방치돼 있었음). `appleboy/ssh-action`으로 GitHub Actions가 VM에 직접 SSH. **삽질 2건**: ① VM 보안 그룹의 SSH가 "내 IP"로만 열려 있어 GitHub Actions 러너 접속이 막혔던 것 → Anywhere로 개방. ② 호스트 키 지문(fingerprint) 불일치로 SSH 핸드셰이크 실패 → 원인은 golang SSH 라이브러리의 기본 알고리즘 우선순위상 VM에 있는 3개 호스트 키(RSA/ECDSA/ED25519) 중 **ECDSA가 먼저 협상**되는데 ED25519 지문을 등록해뒀던 것 — ECDSA 지문으로 교체해 해결. 이 자동화 파이프라인으로 ADR 0021(sweep·reconcile Neon 접근 최소화) 코드도 실제 VM에 정상 반영 완료·헬스체크 확인. **다음 push부터는 완전 자동 배포.** 이전 sweep·reconcile 요약은 아래 유지)
+
+**이전 업데이트 (2026-08-22, ADR 0021 로컬 완료 시점):** (**sweep·reconcile의 Neon 상시 접근 제거(ADR 0021), 로컬 구현·검증 완료** — 방문자 유무와 무관하게 5초/1분 주기로 상시 Postgres(Neon)를 깨우던 두 워커를 "최근 활동 플래그(TTL 90초, `createHeld` 성공 시 세팅) + 하루 1번 보험 확인" 구조로 전환. 활동 중엔 지금까지와 완전히 동일하게 동작(체감 무변화), 유휴 시에만 Postgres 접근이 하루 단위로 줄어 Neon CU-hour 소모가 이론상 월 180시간대에서 1시간 미만으로 감소 추정. 구현 중 기존 sweep/reconcile 통합 테스트가 DB 직접 삽입 헬퍼를 써서 새 플래그를 못 만나 깨졌던 것을 발견·수정(원인: 활동 신호 없이 테스트하던 방식이 새 스킵 로직과 안 맞았음), 스킵/보험 로직 자체 검증 테스트 4건 신규 추가(API 87→91). 로컬 서버로 실제 예매→sweep 만료(EXPIRED)→재고 원복까지 수동 검증 완료. **아직 VM에는 미배포** — 다음 세션에서 `cd.yml` 실행 후 반영 필요. **선행 배경**: 배포 6단계(Dockerize·CI/CD·VM+Nginx·관측·k6 부하·README+ADR) 전부 완료된 뒤(2026-08-21), ADR 0016/0017 백로그 논의 중 "Neon CU-hour가 실제로 문제될지" 질문에서 시작된 작업 — 이전 배포 4단계(Prometheus+Grafana) 요약은 아래 유지)
 
 **이전 업데이트 (2026-08-21, 배포 4단계):** (**배포 4단계 — Prometheus+Grafana 관측 인프라 구축·배포 완료(ADR 0020)** — apps/api에 `/metrics` 신규 노출(요청률·응답시간 히스토그램·confirm/payment 큐 적체, `@Public()`으로 게이트 우회), VM에 node-exporter·prometheus·grafana 3개 컨테이너 추가 기동, `https://grafana.15.164.234.208.sslip.io`(Nginx+HTTPS) 라이브. 배포 중 RAM 1GB VM에서 Grafana가 부팅만으로 메모리 상한(200m)의 99.95%를 소진하는 실측 문제 발견 → 300m으로 상향 + 스왑 1GB 신규 추가로 완화. Prometheus 타겟 3개(api·node·prometheus 자신) 전부 `up` 확인. **대시보드 패널 4개(요청률/p95/에러율/큐 적체)도 사용자가 Grafana UI에서 직접 PromQL을 작성해 완성**(`histogram_quantile`·`rate`·라벨 필터 등 학습). **배포 6단계(Dockerize·CI/CD·VM+Nginx·관측·k6 부하·README+ADR) 전부 완료.** 다음은 §2 "다음 할 일" 3~4번(선택 항목) 중에서 정할 차례. 이전 배포 3단계(VM+Nginx) 요약은 아래 유지)
 
@@ -235,7 +237,7 @@
 
 ## 🔨 진행 중 / 막힌 것
 - (막힌 것 없음.)
-- **ADR 0021(sweep·reconcile Neon 접근 최소화) 코드는 로컬 구현·검증까지 완료, VM 미배포** — 다음 세션에서 `cd.yml` 수동 실행 → VM `docker compose pull && up -d`로 반영 필요(다른 배포 절차와 동일).
+- ✅ ~~ADR 0021 VM 미배포~~ — CD 자동화(ADR 0022)로 반영 완료(2026-08-22).
 - **ADR 0017/0016의 "추후 개선 백로그"(2026-08-15) 중 무엇부터 실제로 붙일지 미정** — 배포(§2) 6단계 전부 완료됐으니 다음 세션에서 확인할 차례.
 - 장시간 테스트 시 JWT(1h) 만료 주의 → 재로그인으로 토큰 갱신.
 
@@ -259,9 +261,10 @@
 - **AMI**: Ubuntu Server (t3.micro, 프리 티어) — 접속 계정은 `ec2-user`가 아니라 **`ubuntu`**
 - **키 페어**: `sunchak-key` — **`.pem` 파일은 gitignore 대상이라 git에 없음. 다른 기기에서 접속하려면 AWS 콘솔에서 새 키 페어를 발급해 기존 인스턴스에 연결하거나(재부팅 필요), 이 기기의 `.pem` 파일을 안전한 방법으로 직접 옮겨야 함.**
 - **접속**: `ssh -i <키경로>/sunchak-key.pem ubuntu@15.164.234.208`
-- **보안 그룹**: SSH(22, 내 IP)·HTTP(80, Anywhere-IPv4)·HTTPS(443, Anywhere-IPv4) 인바운드 허용됨.
-- **현재 상태(2026-08-21)**: Docker Engine·Nginx·Let's Encrypt·앱(api/web/redis) + 관측(node-exporter/prometheus/grafana, ADR 0020) 전부 배포 완료. **라이브 URL**: `https://app.15.164.234.208.sslip.io`(프론트) / `https://api.15.164.234.208.sslip.io`(백엔드) / `https://grafana.15.164.234.208.sslip.io`(관측 대시보드). VM 재배포 절차: 로컬에서 `cd.yml` 수동 실행(GHCR에 새 이미지 push) → VM에서 `cd ~/sunchak && docker compose pull && docker compose up -d`.
+- **보안 그룹**: SSH(22, **Anywhere-IPv4** — 2026-08-22 ADR 0022 위해 "내 IP"에서 개방, GitHub Actions 러너가 SSH로 배포해야 해서 불가피)·HTTP(80, Anywhere-IPv4)·HTTPS(443, Anywhere-IPv4) 인바운드 허용됨.
+- **현재 상태(2026-08-22)**: Docker Engine·Nginx·Let's Encrypt·앱(api/web/redis) + 관측(node-exporter/prometheus/grafana, ADR 0020) 전부 배포 완료. **라이브 URL**: `https://app.15.164.234.208.sslip.io`(프론트) / `https://api.15.164.234.208.sslip.io`(백엔드) / `https://grafana.15.164.234.208.sslip.io`(관측 대시보드). **재배포 절차(ADR 0022, 2026-08-22부터 완전 자동)**: `main`에 push만 하면 `ci.yml` 통과 후 `cd.yml`이 이미지 빌드+GHCR push+VM SSH 반영까지 전부 자동으로 끝난다. 수동으로 다시 돌리고 싶으면 GitHub Actions에서 `cd.yml`을 `workflow_dispatch`로 실행.
 - **VM의 비밀값 파일**: `~/sunchak/api.env`(git 미포함, 권한 600), `~/sunchak/grafana.env`(admin 계정 비밀번호, 마찬가지로 git 미포함·권한 600) — 이 기기가 아닌 다른 기기에서 재배포하려면 이 값들을 다시 채워야 함(위 "다음 할 일" 안내 참고).
+- **GitHub Secrets(ADR 0022, CD 자동 배포용)**: `VM_HOST`·`VM_USERNAME`·`VM_SSH_KEY`·`VM_HOST_FINGERPRINT`(ECDSA 지문 — VM에 RSA/ECDSA/ED25519 세 종류가 다 있는데 golang SSH 라이브러리 기본 협상 순서상 ECDSA가 쓰임). 저장소 자체에 귀속된 값이라 다른 기기에서 이어받을 땐 신경 쓸 필요 없음(로컬 파일 아님, GitHub 웹에서 이미 등록됨).
 - **스왑**: VM에 스왑 1GB 신규 추가(`/swapfile`, `/etc/fstab` 등록 — 재부팅해도 유지). RAM 1GB 박스에 컨테이너 6개(redis/api/web/node-exporter/prometheus/grafana)가 도는 안전망(ADR 0020 배경 참고). Grafana `mem_limit`은 실측 후 200m→300m으로 상향.
 - **VM을 재구성해야 할 경우(IP 변경 등)**: ① Docker Engine 설치(`curl -fsSL https://get.docker.com | sudo sh`) ② `infra/docker-compose.prod.yml`을 `~/sunchak/docker-compose.yml`로 올리고 `api.env` 재작성 ③ `infra/nginx/*.conf`를 `/etc/nginx/sites-available/`에 배치 후 `sites-enabled`에 심볼릭 링크·기본 `default` 사이트 제거 ④ `sudo certbot --nginx -d app.<새IP>.sslip.io -d api.<새IP>.sslip.io --redirect`.
 - **AWS 프리 티어**: 12개월 한시(Oracle/GCP의 "영구 무료"와 다름) — 만료일은 콘솔 우측 상단 계정명 → "계정" → 계정 생성일 + 12개월로 계산.
