@@ -5,7 +5,9 @@
 > - **세션 시작 시**: 이 파일을 가장 먼저 읽고 "다음 할 일"부터 이어간다.
 > - **세션 끝 / 커밋 전**: 이 파일을 **덮어써서** 최신 상태로 갱신한다. (시간순 이력·삽질은 `DEVLOG.md`, 결정 근거는 `decisions/`)
 
-**마지막 업데이트:** 2026-08-21 (**배포 4단계 — Prometheus+Grafana 관측 인프라 구축·배포 완료(ADR 0020)** — apps/api에 `/metrics` 신규 노출(요청률·응답시간 히스토그램·confirm/payment 큐 적체, `@Public()`으로 게이트 우회), VM에 node-exporter·prometheus·grafana 3개 컨테이너 추가 기동, `https://grafana.15.164.234.208.sslip.io`(Nginx+HTTPS) 라이브. 배포 중 RAM 1GB VM에서 Grafana가 부팅만으로 메모리 상한(200m)의 99.95%를 소진하는 실측 문제 발견 → 300m으로 상향 + 스왑 1GB 신규 추가로 완화. Prometheus 타겟 3개(api·node·prometheus 자신) 전부 `up` 확인. **대시보드 패널 4개(요청률/p95/에러율/큐 적체)도 사용자가 Grafana UI에서 직접 PromQL을 작성해 완성**(`histogram_quantile`·`rate`·라벨 필터 등 학습). **배포 6단계(Dockerize·CI/CD·VM+Nginx·관측·k6 부하·README+ADR) 전부 완료.** 다음은 §2 "다음 할 일" 3~4번(선택 항목) 중에서 정할 차례. 이전 배포 3단계(VM+Nginx) 요약은 아래 유지)
+**마지막 업데이트:** 2026-08-22 (**sweep·reconcile의 Neon 상시 접근 제거(ADR 0021), 로컬 구현·검증 완료** — 방문자 유무와 무관하게 5초/1분 주기로 상시 Postgres(Neon)를 깨우던 두 워커를 "최근 활동 플래그(TTL 90초, `createHeld` 성공 시 세팅) + 하루 1번 보험 확인" 구조로 전환. 활동 중엔 지금까지와 완전히 동일하게 동작(체감 무변화), 유휴 시에만 Postgres 접근이 하루 단위로 줄어 Neon CU-hour 소모가 이론상 월 180시간대에서 1시간 미만으로 감소 추정. 구현 중 기존 sweep/reconcile 통합 테스트가 DB 직접 삽입 헬퍼를 써서 새 플래그를 못 만나 깨졌던 것을 발견·수정(원인: 활동 신호 없이 테스트하던 방식이 새 스킵 로직과 안 맞았음), 스킵/보험 로직 자체 검증 테스트 4건 신규 추가(API 87→91). 로컬 서버로 실제 예매→sweep 만료(EXPIRED)→재고 원복까지 수동 검증 완료. **아직 VM에는 미배포** — 다음 세션에서 `cd.yml` 실행 후 반영 필요. **선행 배경**: 배포 6단계(Dockerize·CI/CD·VM+Nginx·관측·k6 부하·README+ADR) 전부 완료된 뒤(2026-08-21), ADR 0016/0017 백로그 논의 중 "Neon CU-hour가 실제로 문제될지" 질문에서 시작된 작업 — 이전 배포 4단계(Prometheus+Grafana) 요약은 아래 유지)
+
+**이전 업데이트 (2026-08-21, 배포 4단계):** (**배포 4단계 — Prometheus+Grafana 관측 인프라 구축·배포 완료(ADR 0020)** — apps/api에 `/metrics` 신규 노출(요청률·응답시간 히스토그램·confirm/payment 큐 적체, `@Public()`으로 게이트 우회), VM에 node-exporter·prometheus·grafana 3개 컨테이너 추가 기동, `https://grafana.15.164.234.208.sslip.io`(Nginx+HTTPS) 라이브. 배포 중 RAM 1GB VM에서 Grafana가 부팅만으로 메모리 상한(200m)의 99.95%를 소진하는 실측 문제 발견 → 300m으로 상향 + 스왑 1GB 신규 추가로 완화. Prometheus 타겟 3개(api·node·prometheus 자신) 전부 `up` 확인. **대시보드 패널 4개(요청률/p95/에러율/큐 적체)도 사용자가 Grafana UI에서 직접 PromQL을 작성해 완성**(`histogram_quantile`·`rate`·라벨 필터 등 학습). **배포 6단계(Dockerize·CI/CD·VM+Nginx·관측·k6 부하·README+ADR) 전부 완료.** 다음은 §2 "다음 할 일" 3~4번(선택 항목) 중에서 정할 차례. 이전 배포 3단계(VM+Nginx) 요약은 아래 유지)
 
 **이전 업데이트 (2026-08-21, 배포 5단계):** (**최종 k6 부하 리포트 완료** — 대기열→HELD→결제 전체 파이프라인을 처음으로 k6로 실측(`full_pipeline_load.js`). 로컬(150 VU, 재고 100 — 입장허가 126·재고소진 24)과 배포 VM(8 VU, VM 자원 보호로 소규모)을 나란히 측정, 체크 성공률 둘 다 100%. VM 개별 요청 지연이 로컬보다 6~8배 높게 나왔는데(p95 로컬 110ms vs VM 844ms) 원인을 Neon DB 네트워크 홉·실제 인터넷 왕복·t3.micro 사양 세 가지로 설명 가능함을 확인(원인불명 이상 지연 없음). VM 테스트 직후 Prometheus 질의로 이 부하가 실제로 잡혔는지도 검증(오늘 만든 관측 파이프라인의 첫 실전 확인). 결과 문서 `docs/perf/2026-08-21-full-pipeline-load.md`. VM에 만든 테스트 계정·이벤트는 정리 완료)
 
@@ -233,6 +235,7 @@
 
 ## 🔨 진행 중 / 막힌 것
 - (막힌 것 없음.)
+- **ADR 0021(sweep·reconcile Neon 접근 최소화) 코드는 로컬 구현·검증까지 완료, VM 미배포** — 다음 세션에서 `cd.yml` 수동 실행 → VM `docker compose pull && up -d`로 반영 필요(다른 배포 절차와 동일).
 - **ADR 0017/0016의 "추후 개선 백로그"(2026-08-15) 중 무엇부터 실제로 붙일지 미정** — 배포(§2) 6단계 전부 완료됐으니 다음 세션에서 확인할 차례.
 - 장시간 테스트 시 JWT(1h) 만료 주의 → 재로그인으로 토큰 갱신.
 
@@ -279,7 +282,7 @@
 - **이 기기 `.env`에 `DEMO_GATE_PASSWORD="sunchak-demo"` 추가함(2026-08-06)** — 프론트 게이트 화면을 테스트하려면 필요(미설정 시 게이트 자동 비활성화). 값은 비밀이 아니라 원하면 바꿔도 무방.
 
 ## 🧪 테스트 실행법
-- `cd apps/api && pnpm exec jest`(전체 87개 — `jwt.strategy.spec.ts`·`auth.controller.spec.ts`(로그아웃) + `events.service.spec.ts`(`findOrCreateOwnDemoEvent`/`findAll`) 신규). 사전조건: 로컬 PG·Redis 기동.
+- `cd apps/api && pnpm exec jest`(전체 91개 — `sweep.processor.spec.ts`·`reconcile.processor.spec.ts`에 ADR 0021 스킵/보험 로직 검증 4건 신규, 두 파일의 기존 헬퍼도 활동 플래그를 세우도록 수정됨). 사전조건: 로컬 PG·Redis 기동.
 - `cd apps/web && pnpm test`(전체 40개, Vitest — `header.test.tsx`·`queue-notice-modal.test.tsx`·`ticket-list.test.tsx`·`auto-help-popup.test.tsx` 신규, `demo-dashboard.test.tsx`는 게이지/퍼센티지 막대 전제로 재작성, `event-list.test.tsx`는 클릭→팝업→이동 흐름으로 재작성). ⚠️ 이 세션 bash 환경에 `NODE_ENV=production`이 섞여들면 `React.act is not a function`으로 전부 깨진다(코드 문제 아님) — `NODE_ENV=test pnpm test`로 덮어써서 실행.
 - **테스트 후 데모 이벤트가 지워진다**(위 참고) — 브라우저로 다시 보려면 `pnpm exec prisma db seed` + `POST /demo/reset` 필요.
 - ⚠️ 실DB를 쓰는 통합 스펙 파일이 여러 개(reservations/sweep/reconcile/demo)라 **`maxWorkers: 1`(package.json jest 설정)로 직렬 실행** — 병렬 실행 시 서로의 `beforeEach` 전체삭제가 충돌한다(2.5에서 발견).
