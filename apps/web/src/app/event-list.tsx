@@ -107,7 +107,7 @@ export function EventList() {
             <button
               key={event.id}
               onClick={() => setSelectedEventId(event.id)}
-              className="rounded-lg text-left hover:opacity-80"
+              className="cursor-pointer rounded-lg text-left hover:opacity-80"
             >
               {card}
             </button>
