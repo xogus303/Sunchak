@@ -1,19 +1,21 @@
 import { ForbiddenException, Injectable, MessageEvent } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Observable, timer } from 'rxjs';
+import { merge, Observable, timer } from 'rxjs';
 import { map, switchMap } from 'rxjs/operators';
 import { RedisService } from '../redis/redis.service';
-import { ACTIVE_QUEUES_KEY } from './queue.constants';
+import { QueueEventsService } from './queue-events.service';
+import { ACTIVE_QUEUES_KEY, ADMISSION_BATCH_SIZE, ADMISSION_INTERVAL_MS } from './queue.constants';
 
 // SSE 순번 확인 폴링 주기 — 0016 stats 대시보드와 같은 값(체감상 실시간, 구현은 단순).
 const STATUS_POLL_INTERVAL_MS = 1_000;
 
 // 한 스냅샷의 모양 — 대기 중이면 순번(0부터), 입장 허가를 받았으면 rank는 null이 되고
 // admitted가 true로 바뀐다. 둘 다 null/false면 대기열에 없다(=한 번도 안 들어왔거나
-// 허가창이 만료돼 밀려난 것).
+// 허가창이 만료돼 밀려난 것). etaSeconds는 대기 중일 때만 값이 있다.
 export interface QueueStatus {
   rank: number | null;
   admitted: boolean;
+  etaSeconds: number | null;
 }
 
 /**
@@ -33,6 +35,7 @@ export class QueueService {
   constructor(
     private readonly redis: RedisService,
     private readonly config: ConfigService,
+    private readonly events: QueueEventsService,
   ) {}
 
   private admissionWindowMs(): number {
@@ -85,17 +88,36 @@ export class QueueService {
     }
   }
 
+  // 입장 처리 워커(AdmissionProcessor)가 실제로 하는 일 그대로를 계산에 반영한다 —
+  // "초당 N명" 같은 연속 처리율 근사가 아니라, rank가 몇 번째 배치(ADMISSION_BATCH_SIZE명씩,
+  // ADMISSION_INTERVAL_MS 주기)에서 빠지는지를 그대로 센다.
+  private eta(rank: number | null): number | null {
+    if (rank === null) return null;
+    const batchesAhead = Math.ceil((rank + 1) / ADMISSION_BATCH_SIZE);
+    return batchesAhead * (ADMISSION_INTERVAL_MS / 1000);
+  }
+
   async status(eventId: number, userId: number): Promise<QueueStatus> {
     const [rank, admitted] = await Promise.all([
       this.redis.zrank(this.queueKey(eventId), String(userId)),
       this.redis.exists(this.admittedKey(eventId, userId)),
     ]);
-    return { rank, admitted: admitted === 1 };
+    return { rank, admitted: admitted === 1, etaSeconds: this.eta(rank) };
   }
 
+  // 폴링(1초 주기)만으로는 "대기 → 허가" 전환이 최대 1초 늦게 보인다. 확정 SSE(0006
+  // 2.4)와 같은 이유로 방송국(QueueEventsService)을 함께 구독해, 이 유저가 허가받는
+  // 순간 폴링 틱을 기다리지 않고 즉시 재조회해 흘려보낸다. 대기 중 rank가 계속
+  // 바뀌는 것까지 매번 이벤트로 방송하긴 번거로워 그건 폴링에 맡긴다(ADR 0017
+  // 백로그, 2026-08-15에서 결정한 범위).
   streamStatus(eventId: number, userId: number): Observable<MessageEvent> {
-    return timer(0, STATUS_POLL_INTERVAL_MS).pipe(
+    const polling$ = timer(0, STATUS_POLL_INTERVAL_MS).pipe(
       switchMap(() => this.status(eventId, userId)),
+    );
+    const admitted$ = this.events
+      .ofUser(eventId, userId)
+      .pipe(switchMap(() => this.status(eventId, userId)));
+    return merge(polling$, admitted$).pipe(
       map((status) => ({ data: status }) as MessageEvent),
     );
   }

@@ -73,6 +73,30 @@ describe("BookingForm (대기열 → 예매 → 결제, ADR 0017/0018)", () => {
     );
   });
 
+  // ADR 0017 백로그(2026-08-15) — 순번에 예상 대기시간(ETA)을 붙이는 개선.
+  // 서버가 etaSeconds를 안 준 스냅샷(다른 테스트들의 mock)은 그대로 문구가 안
+  // 붙어야 하고(findByRank 헬퍼들의 정확 일치가 이미 이걸 보장), 값을 주면
+  // 화면에 그 값이 반영되는지만 이 테스트에서 확인한다.
+  it("서버가 준 etaSeconds를 예상 대기시간으로 표시한다", async () => {
+    fetchMock.mockImplementation(
+      baseFetchMock((u) => (u.includes("/queue") ? Promise.resolve({ ok: true, json: async () => ({}) }) : null)),
+    );
+    render(<BookingForm eventId={1} eventTitle="선착순 데모 콘서트" />);
+
+    await screen.findByText("내 예매 — 선착순 데모 콘서트");
+    await findByRank(0);
+
+    act(() => queueSource()?.emit({ rank: 5, admitted: false, etaSeconds: 12 }));
+    await screen.findByText(
+      (_, element) => element?.textContent === "대기 중입니다 — 현재 순번 5 (예상 대기 약 12초)",
+    );
+
+    act(() => queueSource()?.emit({ rank: 40, admitted: false, etaSeconds: 90 }));
+    await screen.findByText(
+      (_, element) => element?.textContent === "대기 중입니다 — 현재 순번 40 (예상 대기 약 2분)",
+    );
+  });
+
   // React StrictMode(Next.js App Router 개발 모드 기본값)는 마운트 시 effect를
   // 일부러 두 번 실행한다 — 가드 없이 두면 2번째 실행의 simulate 요청이 쿨다운에
   // 걸려 즉시 거부되고, 곧바로 본인 입장을 호출해 1번째 실행의 크라우드보다

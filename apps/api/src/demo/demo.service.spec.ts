@@ -282,6 +282,7 @@ describe('DemoService (통합 — 데모 리셋)', () => {
     await expect(queueService.status(eventId, userId)).resolves.toEqual({
       rank: null,
       admitted: false,
+      etaSeconds: null,
     });
     await expect(redis.sismember(ACTIVE_QUEUES_KEY, String(eventId))).resolves.toBe(0);
   });

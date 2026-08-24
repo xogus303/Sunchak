@@ -8,6 +8,13 @@ import { TicketCard } from "./ticket-card";
 interface QueueSnapshot {
   rank: number | null;
   admitted: boolean;
+  etaSeconds: number | null;
+}
+
+// 60초 미만은 초, 그 이상은 분 단위로 반올림 없이 올림 표시(과소평가 방지).
+function formatEta(etaSeconds: number): string {
+  if (etaSeconds < 60) return `${etaSeconds}초`;
+  return `${Math.ceil(etaSeconds / 60)}분`;
 }
 
 interface BookingFormProps {
@@ -26,7 +33,7 @@ interface BookingFormProps {
 // 같이 바뀌어 보이는 문제가 생긴다.
 type FlowState =
   | { phase: "idle" }
-  | { phase: "queued"; rank: number }
+  | { phase: "queued"; rank: number; etaSeconds: number | null }
   | { phase: "admitted" }
   | { phase: "held"; reservationId: number; quantity: number }
   | { phase: "paying"; reservationId: number; quantity: number }
@@ -59,7 +66,7 @@ export function BookingForm({ eventId, eventTitle }: BookingFormProps) {
       if (snapshot.admitted) {
         setState((prev) => (prev.phase === "queued" ? { phase: "admitted" } : prev));
       } else if (snapshot.rank !== null) {
-        setState({ phase: "queued", rank: snapshot.rank });
+        setState({ phase: "queued", rank: snapshot.rank, etaSeconds: snapshot.etaSeconds });
       } else {
         // rank도 없고 허가도 없음 = 입장 허가창을 놓쳐 밀려남.
         setState({ phase: "expired" });
@@ -77,7 +84,7 @@ export function BookingForm({ eventId, eventTitle }: BookingFormProps) {
       setState({ phase: "error", message: body?.message ?? "대기열 입장에 실패했습니다." });
       return;
     }
-    setState({ phase: "queued", rank: 0 });
+    setState({ phase: "queued", rank: 0, etaSeconds: null });
   }, [eventId]);
 
   // 방문자가 이 이벤트를 선택하는 순간(마운트 시점) 자동으로 소규모~중간
@@ -130,7 +137,7 @@ export function BookingForm({ eventId, eventTitle }: BookingFormProps) {
             setState({ phase: "error", message: body?.message ?? "대기열 입장에 실패했습니다." });
             return;
           }
-          setState({ phase: "queued", rank: 0 });
+          setState({ phase: "queued", rank: 0, etaSeconds: null });
         }),
       );
   }, [eventId]);
@@ -202,6 +209,9 @@ export function BookingForm({ eventId, eventTitle }: BookingFormProps) {
       {state.phase === "queued" && (
         <p className="text-sm text-zinc-600 dark:text-zinc-400">
           대기 중입니다 — 현재 순번 <span className="font-semibold">{state.rank}</span>
+          {typeof state.etaSeconds === "number" && (
+            <> (예상 대기 약 {formatEta(state.etaSeconds)})</>
+          )}
         </p>
       )}
 

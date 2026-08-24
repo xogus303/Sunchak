@@ -5,7 +5,9 @@
 > - **세션 시작 시**: 이 파일을 가장 먼저 읽고 "다음 할 일"부터 이어간다.
 > - **세션 끝 / 커밋 전**: 이 파일을 **덮어써서** 최신 상태로 갱신한다. (시간순 이력·삽질은 `DEVLOG.md`, 결정 근거는 `decisions/`)
 
-**마지막 업데이트:** 2026-08-22 (**CD 완전 자동화(ADR 0022) 구축 + ADR 0021 VM 배포까지 완료** — `main` push → `ci.yml` 통과 → `cd.yml`이 자동으로 이미지 빌드+GHCR push+VM SSH 반영까지 사람 개입 없이 끝나는 구조로 전환(기존엔 CI/CD 구축 초기부터 "VM 배포 job은 나중에 추가 예정"이라고 남겨두고 방치돼 있었음). `appleboy/ssh-action`으로 GitHub Actions가 VM에 직접 SSH. **삽질 2건**: ① VM 보안 그룹의 SSH가 "내 IP"로만 열려 있어 GitHub Actions 러너 접속이 막혔던 것 → Anywhere로 개방. ② 호스트 키 지문(fingerprint) 불일치로 SSH 핸드셰이크 실패 → 원인은 golang SSH 라이브러리의 기본 알고리즘 우선순위상 VM에 있는 3개 호스트 키(RSA/ECDSA/ED25519) 중 **ECDSA가 먼저 협상**되는데 ED25519 지문을 등록해뒀던 것 — ECDSA 지문으로 교체해 해결. 이 자동화 파이프라인으로 ADR 0021(sweep·reconcile Neon 접근 최소화) 코드도 실제 VM에 정상 반영 완료·헬스체크 확인. **다음 push부터는 완전 자동 배포.** 이전 sweep·reconcile 요약은 아래 유지)
+**마지막 업데이트:** 2026-08-25 (**대기열 순번 실시간화 + ETA 표시(ADR 0017 백로그 항목 1) 구현·검증 완료 + 잡일 2건** — 순번 표시가 1초 폴링뿐이라 "허가되는 순간"이 최대 1초 늦게 보이던 걸, 이미 있던 입장 허가 방송 버스(`QueueEventsService`, AdmissionProcessor가 admit 직후 publish)를 `QueueService.streamStatus()`가 함께 구독(`merge`)하도록 고쳐 허가 즉시 push되게 함(폴링은 "대기 중 순번" 갱신용으로 그대로 유지 — ADR이 애초에 정한 범위). 같이 `QueueStatus`에 `etaSeconds` 추가 — "초당 N명" 근사가 아니라 AdmissionProcessor가 실제로 하는 일(`ADMISSION_BATCH_SIZE`명씩 `ADMISSION_INTERVAL_MS` 주기 배치 처리)을 그대로 반영해 "rank가 몇 번째 배치에서 빠지는가"로 계산. 프론트(`booking-form.tsx`)에 "(예상 대기 약 M초/분)" 문구 추가. 실서버 curl e2e로 `rank:26→etaSeconds:4`, 배치 처리 후 `rank:6→etaSeconds:2`, `admitted:true` 전환까지 설계대로 동작 확인. API 91→93, web 40→41 그린, tsc/eslint 클린. **잡일 2건**: ① `/events` 판매중 카드에 `cursor-pointer` 추가(버튼 기본 커서가 `pointer`가 아니라 호버해도 클릭 가능해 보이지 않던 문제). ② 백로그로 남아있던 "`simulateLoad()` 쿨다운이 이벤트 확인보다 먼저 걸리는 순서 문제"는 재확인 결과 **이미 해소된 stale 이슈**로 판명(2026-08-07 유저별 격리 작업에서 `findOrCreateOwnDemoEvent()`가 이벤트를 자동 생성하도록 바뀌어 애초에 404가 안 남) — 코드 변경 없이 정리. **npm 보안 검토 자동화 항목은 백로그에서 제거**(사용자 요청). 이전 CD 자동화(ADR 0022) 요약은 아래 유지)
+
+**이전 업데이트 (2026-08-22, CD 완전 자동화):** (**CD 완전 자동화(ADR 0022) 구축 + ADR 0021 VM 배포까지 완료** — `main` push → `ci.yml` 통과 → `cd.yml`이 자동으로 이미지 빌드+GHCR push+VM SSH 반영까지 사람 개입 없이 끝나는 구조로 전환(기존엔 CI/CD 구축 초기부터 "VM 배포 job은 나중에 추가 예정"이라고 남겨두고 방치돼 있었음). `appleboy/ssh-action`으로 GitHub Actions가 VM에 직접 SSH. **삽질 2건**: ① VM 보안 그룹의 SSH가 "내 IP"로만 열려 있어 GitHub Actions 러너 접속이 막혔던 것 → Anywhere로 개방. ② 호스트 키 지문(fingerprint) 불일치로 SSH 핸드셰이크 실패 → 원인은 golang SSH 라이브러리의 기본 알고리즘 우선순위상 VM에 있는 3개 호스트 키(RSA/ECDSA/ED25519) 중 **ECDSA가 먼저 협상**되는데 ED25519 지문을 등록해뒀던 것 — ECDSA 지문으로 교체해 해결. 이 자동화 파이프라인으로 ADR 0021(sweep·reconcile Neon 접근 최소화) 코드도 실제 VM에 정상 반영 완료·헬스체크 확인. **다음 push부터는 완전 자동 배포.** 이전 sweep·reconcile 요약은 아래 유지)
 
 **이전 업데이트 (2026-08-22, ADR 0021 로컬 완료 시점):** (**sweep·reconcile의 Neon 상시 접근 제거(ADR 0021), 로컬 구현·검증 완료** — 방문자 유무와 무관하게 5초/1분 주기로 상시 Postgres(Neon)를 깨우던 두 워커를 "최근 활동 플래그(TTL 90초, `createHeld` 성공 시 세팅) + 하루 1번 보험 확인" 구조로 전환. 활동 중엔 지금까지와 완전히 동일하게 동작(체감 무변화), 유휴 시에만 Postgres 접근이 하루 단위로 줄어 Neon CU-hour 소모가 이론상 월 180시간대에서 1시간 미만으로 감소 추정. 구현 중 기존 sweep/reconcile 통합 테스트가 DB 직접 삽입 헬퍼를 써서 새 플래그를 못 만나 깨졌던 것을 발견·수정(원인: 활동 신호 없이 테스트하던 방식이 새 스킵 로직과 안 맞았음), 스킵/보험 로직 자체 검증 테스트 4건 신규 추가(API 87→91). 로컬 서버로 실제 예매→sweep 만료(EXPIRED)→재고 원복까지 수동 검증 완료. **아직 VM에는 미배포** — 다음 세션에서 `cd.yml` 실행 후 반영 필요. **선행 배경**: 배포 6단계(Dockerize·CI/CD·VM+Nginx·관측·k6 부하·README+ADR) 전부 완료된 뒤(2026-08-21), ADR 0016/0017 백로그 논의 중 "Neon CU-hour가 실제로 문제될지" 질문에서 시작된 작업 — 이전 배포 4단계(Prometheus+Grafana) 요약은 아래 유지)
 
@@ -234,11 +236,16 @@
   - **Let's Encrypt**: `certbot --nginx`(이메일 미등록, 사용자 확인 후 결정 — 개인 학습 프로젝트라 굳이 외부에 이메일 안 넘기는 쪽 선택)로 두 서브도메인 인증서 발급, HTTP→HTTPS 자동 리다이렉트까지 certbot이 Nginx 설정에 반영. 갱신은 certbot이 자동 스케줄링(90일 만료).
   - **검증**: 컨테이너 3개 기동 후 VM 내부(`127.0.0.1`)에서 api `/health`·web `/` 200 확인 → 외부에서 HTTP(80) 200 확인 → certbot 발급 후 HTTPS(443) 200 + HTTP→HTTPS 301 확인 → 배포된 도메인의 `/demo/gate`에 틀린 비번으로 curl → 401 정상 응답(전체 요청 경로 — Nginx→컨테이너→가드 검증 — 가 실제로 동작함을 확인).
   - **✅ 브라우저 e2e 확인 완료(사용자 직접 검증)**: 게이트 통과 → Google 로그인 → 이벤트 상세 진입 → 12매 예매 확정("확정" 배지) → 오른쪽 실시간 판매 현황(재고 잔량 게이지, 최종 결과 퍼센티지 막대, 확보중/결제성공/결제실패/포기 등 세부 카운트)이 SSE로 정상 갱신되는 것까지 스크린샷으로 확인. Google Cloud Console 콜백 URI 등록도 이미 반영돼 있었음(로그인 성공이 그 증거).
+- **✅ 대기열 순번 실시간화 + ETA 표시 구현·검증 완료 (2026-08-25, ADR 0017 백로그 항목 1)**: 순번 표시가 1초 폴링뿐이라 결제 확정 SSE(진짜 이벤트 기반)와 "실시간"의 의미가 갈리던 갭을 해소.
+  - **구현**: `AdmissionProcessor`가 이미 admit 직후 방송하던 `QueueEventsService` 버스를 `QueueService.streamStatus()`가 `merge`로 함께 구독 — 허가 전환 순간엔 폴링(최대 1초 지연)을 기다리지 않고 즉시 재조회해 push. "대기 중 rank 갱신"은 매번 이벤트로 방송하기 번거로워 기존 폴링에 그대로 맡김(ADR이 애초에 정한 범위). `QueueStatus`에 `etaSeconds` 신규 — "초당 N명" 연속 근사가 아니라 `AdmissionProcessor`의 실제 배치 동작(`ADMISSION_BATCH_SIZE`명씩 `ADMISSION_INTERVAL_MS` 주기)을 그대로 반영해 "rank가 몇 번째 배치에서 빠지는가"로 계산. `booking-form.tsx`에 "(예상 대기 약 M초/분)" 문구 추가.
+  - **실서버 e2e**: 45명 가상 유저 투입 후 본인 대기열 입장 → curl SSE로 `rank:26→etaSeconds:4`, 배치 처리 후 `rank:6→etaSeconds:2`, 곧이어 `admitted:true→etaSeconds:null` 전환까지 설계대로 실측 확인.
+  - **테스트**: `queue.service.spec.ts` 신규 2건(즉시 push 확인, eta 배치 경계값 확인) + 기존 status 단언 전부에 `etaSeconds` 반영. `admission.processor.spec.ts`/`demo.service.spec.ts`의 status 단언도 갱신. **API 91→93 그린.** `booking-form.test.tsx` 신규 1건(초/분 단위 ETA 문구 확인). **web 40→41 그린.** tsc/eslint 클린.
+  - **잡일 2건 같이 처리**: ① `/events` 판매중 카드에 `cursor-pointer` 추가(버튼 기본 커서가 `pointer`가 아니라 호버해도 클릭 가능해 보이지 않던 문제, 빌드 CSS 산출물로 확인). ② 백로그의 "`simulateLoad()` 쿨다운이 이벤트 확인보다 먼저 걸리는 문제"는 재확인 결과 이미 해소된 stale 이슈로 판명(2026-08-07 유저별 격리 작업에서 `findOrCreateOwnDemoEvent()`가 이벤트를 자동 생성하도록 바뀌어 애초에 404가 안 남) — 코드 변경 없이 정리. npm 보안 검토 자동화 백로그 항목은 사용자 요청으로 제거.
 
 ## 🔨 진행 중 / 막힌 것
 - (막힌 것 없음.)
 - ✅ ~~ADR 0021 VM 미배포~~ — CD 자동화(ADR 0022)로 반영 완료(2026-08-22).
-- **ADR 0017/0016의 "추후 개선 백로그"(2026-08-15) 중 무엇부터 실제로 붙일지 미정** — 배포(§2) 6단계 전부 완료됐으니 다음 세션에서 확인할 차례.
+- ✅ ~~ADR 0017 백로그 항목 1(순번 실시간화 + ETA)~~ — 구현·검증 완료(2026-08-25). **ADR 0017 백로그 항목 2(대용량 트래픽 대응, ADR 0016과 겹침)는 아직 미착수** — 규모가 커서(새 스키마·Neon API 연동·별도 ADR 필요) 다음 세션에서 착수 여부 결정.
 - 장시간 테스트 시 JWT(1h) 만료 주의 → 재로그인으로 토큰 갱신.
 
 ## ▶️ 다음 할 일 (이 순서로)
@@ -252,8 +259,7 @@
    6. ✅ ~~**README + 회고(트러블슈팅 기록)**~~ — 루트 `README.md` W1 착수 이전 상태로 낡아있던 것 전면 개정(라이브 데모 URL 3개·예매 파이프라인 다이어그램·실제 폴더 구조·성능 요약·회고 6건). 회고는 DEVLOG·STATUS 근거 기반으로만 작성(지어내지 않음) — lost update 재현, Redis 4.6배, StrictMode 이중마운트 버그, obliterate 사고, CI 동점 버그, Grafana 메모리 실측 6개 사례(2026-08-21).
    7. ✅ ~~**(필수) ADR·설계 문서 최신화**~~ — Explore 서브에이전트로 `docs/decisions/` 전체를 코드와 대조(2026-08-21). 새 드리프트 3건 발견·개정 이력으로 반영: 0017(대기열 score를 `Date.now()`→Redis `INCR`로 교체한 버그 수정 2건 미기록), 0019(VM 공급자가 계획한 Oracle Cloud Always Free가 아니라 AWS EC2로 전환된 사실 미반영), 0011(2026-08-08 개정 이력이 예고한 "배포 시점 재검토"가 실제로 이뤄져 "로컬 `.env` 수동 관리"로 정식 Superseded 확정). 0010/0013/0016/0018은 이미 반영돼 있어 추가 조치 불필요. **배포 6단계 전부 완료.**
    - (여유 있으면 스트레치, 필수 아님) 분산 락(Redlock)·read replica·Terraform·K8s.
-3. (선택) `simulateLoad()`가 쿨다운을 데모 이벤트 확인보다 먼저 거는 순서 정리(위 축 B-1/B-2 "발견(보류)" 참고).
-4. (선택, 프로젝트 완성 후) **npm 패키지 보안 검토 자동화 도입** — 비용 0원. GitHub Dependabot 활성화(리포 Settings) + CI(GitHub Actions)에 `pnpm audit` 스텝 추가 + Socket.dev 무료 GitHub App 연결(행위 기반 탐지, PR마다 자동 실행). **커버 범위가 npq보다 넓어서 선택**: npq는 설치 순간 1회 스냅샷만 보는 반면, 이 조합은 이미 설치된 의존성 전체를 생애주기 내내 계속 재검사함(설치 후 새로 등록되는 CVE까지 커버). 2026-08-06 대화에서 조사·확정.
+3. ✅ ~~`simulateLoad()`가 쿨다운을 데모 이벤트 확인보다 먼저 거는 순서 정리~~ — **재확인 결과 stale(2026-08-25)**: 이 항목은 2026-08-05에 기록됐는데, 이틀 뒤(2026-08-07) "유저별 데모 격리" 작업에서 이벤트 조회 방식이 `findOrCreateOwnDemoEvent()`로 바뀌어 이벤트가 없으면 그 자리에서 자동 생성하도록 변경됨(`events.service.ts:57`) — 404 자체가 더 이상 발생하지 않아 "쿨다운만 소비되고 404로 실패"하는 시나리오가 사라졌다. 테스트에도 이미 회귀 케이스로 반영돼 있음(`demo.service.spec.ts:160`). 코드 변경 불필요, 해소로 정리.
 
 ## 🚀 배포 VM 정보 (AWS EC2, 2026-08-19 발급)
 - **리전**: 아시아 태평양(서울) `ap-northeast-2`. (처음 버지니아로 잘못 만들었다가 재생성 — 리전 간 인스턴스 이동 불가, AMI·키 페어·보안 그룹 전부 리전별 별개라는 점 확인함.)

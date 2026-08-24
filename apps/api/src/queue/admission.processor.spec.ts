@@ -7,7 +7,18 @@ import { AdmissionProcessor } from './admission.processor';
 import { QueueService } from './queue.service';
 import { QueueEventsService } from './queue-events.service';
 import { RedisService } from '../redis/redis.service';
-import { ADMISSION_QUEUE, ADMISSION_BATCH_SIZE, ACTIVE_QUEUES_KEY } from './queue.constants';
+import {
+  ADMISSION_QUEUE,
+  ADMISSION_BATCH_SIZE,
+  ADMISSION_INTERVAL_MS,
+  ACTIVE_QUEUES_KEY,
+} from './queue.constants';
+
+// queue.service.spec.ts의 expectedEta와 같은 식(중복이지만 파일 간 헬퍼 공유는
+// 이 정도 규모에선 과함 — 두 파일 다 이미 각자 완결된 통합 테스트).
+function expectedEta(rank: number): number {
+  return Math.ceil((rank + 1) / ADMISSION_BATCH_SIZE) * (ADMISSION_INTERVAL_MS / 1000);
+}
 
 // 핵심(대기열에서 N명 꺼내 허가하고 방송하는 것)이 실제 Redis Sorted Set/TTL을
 // 다뤄야 의미 있게 검증된다. process()를 직접 호출해 반복 타이머(2초)를 기다리지 않는다
@@ -69,14 +80,19 @@ describe('AdmissionProcessor (통합 — 입장 처리, ADR 0017)', () => {
     await processor.process({} as Job);
 
     // 앞 20명은 허가받아 대기열에서 빠지고(rank=null), 뒤 5명은 그대로 대기 중이다.
-    await expect(queueService.status(eventId, 1)).resolves.toEqual({ rank: null, admitted: true });
+    await expect(queueService.status(eventId, 1)).resolves.toEqual({
+      rank: null,
+      admitted: true,
+      etaSeconds: null,
+    });
     await expect(queueService.status(eventId, ADMISSION_BATCH_SIZE)).resolves.toEqual({
       rank: null,
       admitted: true,
+      etaSeconds: null,
     });
     await expect(
       queueService.status(eventId, ADMISSION_BATCH_SIZE + 1),
-    ).resolves.toEqual({ rank: 0, admitted: false });
+    ).resolves.toEqual({ rank: 0, admitted: false, etaSeconds: expectedEta(0) });
   });
 
   it('허가한 사용자마다 입장 허가 방송을 내보낸다', async () => {

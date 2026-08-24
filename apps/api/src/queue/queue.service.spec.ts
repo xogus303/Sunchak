@@ -1,9 +1,18 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigModule } from '@nestjs/config';
 import { ForbiddenException } from '@nestjs/common';
+import { firstValueFrom } from 'rxjs';
+import { take, toArray } from 'rxjs/operators';
 import { QueueService } from './queue.service';
+import { QueueEventsService } from './queue-events.service';
 import { RedisService } from '../redis/redis.service';
-import { ACTIVE_QUEUES_KEY } from './queue.constants';
+import { ACTIVE_QUEUES_KEY, ADMISSION_BATCH_SIZE, ADMISSION_INTERVAL_MS } from './queue.constants';
+
+// status()의 eta 계산과 같은 식 — 상수를 그대로 참조해 배치 크기/주기가 바뀌어도
+// 테스트가 따라간다(숫자를 하드코딩하면 상수 변경 시 조용히 안 맞게 된다).
+function expectedEta(rank: number): number {
+  return Math.ceil((rank + 1) / ADMISSION_BATCH_SIZE) * (ADMISSION_INTERVAL_MS / 1000);
+}
 
 // join/admit/assertAdmitted는 '실제' Redis Sorted Set·TTL 동작이 핵심이라
 // mock으로는 검증이 무의미하다 — sweep/reconcile과 같은 이유로 통합 테스트로 짠다.
@@ -11,18 +20,20 @@ describe('QueueService (통합 — 대기열 admission, ADR 0017)', () => {
   let moduleRef: TestingModule;
   let service: QueueService;
   let redis: RedisService;
+  let events: QueueEventsService;
 
   const eventId = 9001; // 이 스펙 전용 가상 이벤트 id(실제 Event 행 불필요 — Redis만 씀)
 
   beforeAll(async () => {
     moduleRef = await Test.createTestingModule({
       imports: [ConfigModule.forRoot({ isGlobal: true })],
-      providers: [QueueService, RedisService],
+      providers: [QueueService, RedisService, QueueEventsService],
     }).compile();
     await moduleRef.init();
 
     service = moduleRef.get(QueueService);
     redis = moduleRef.get(RedisService);
+    events = moduleRef.get(QueueEventsService);
   });
 
   afterAll(async () => {
@@ -39,7 +50,7 @@ describe('QueueService (통합 — 대기열 admission, ADR 0017)', () => {
     await service.join(eventId, 1);
 
     const status = await service.status(eventId, 1);
-    expect(status).toEqual({ rank: 0, admitted: false });
+    expect(status).toEqual({ rank: 0, admitted: false, etaSeconds: expectedEta(0) });
     await expect(redis.sismember(ACTIVE_QUEUES_KEY, String(eventId))).resolves.toBe(1);
   });
 
@@ -47,8 +58,8 @@ describe('QueueService (통합 — 대기열 admission, ADR 0017)', () => {
     await service.join(eventId, 1);
     await service.join(eventId, 2);
 
-    await expect(service.status(eventId, 1)).resolves.toEqual({ rank: 0, admitted: false });
-    await expect(service.status(eventId, 2)).resolves.toEqual({ rank: 1, admitted: false });
+    await expect(service.status(eventId, 1)).resolves.toEqual({ rank: 0, admitted: false, etaSeconds: expectedEta(0) });
+    await expect(service.status(eventId, 2)).resolves.toEqual({ rank: 1, admitted: false, etaSeconds: expectedEta(1) });
   });
 
   it('같은 사람이 다시 join해도(중복 클릭) 원래 순번을 유지한다', async () => {
@@ -56,7 +67,7 @@ describe('QueueService (통합 — 대기열 admission, ADR 0017)', () => {
     await service.join(eventId, 2);
     await service.join(eventId, 1); // 중복 클릭
 
-    await expect(service.status(eventId, 1)).resolves.toEqual({ rank: 0, admitted: false });
+    await expect(service.status(eventId, 1)).resolves.toEqual({ rank: 0, admitted: false, etaSeconds: expectedEta(0) });
   });
 
   it('입장 허가(admit) 전에는 assertAdmitted가 거부한다', async () => {
@@ -76,9 +87,9 @@ describe('QueueService (통합 — 대기열 admission, ADR 0017)', () => {
     await service.admit(eventId, 1);
 
     await expect(service.assertAdmitted(eventId, 1)).resolves.toBeUndefined();
-    await expect(service.status(eventId, 1)).resolves.toEqual({ rank: null, admitted: true });
+    await expect(service.status(eventId, 1)).resolves.toEqual({ rank: null, admitted: true, etaSeconds: null });
     // 아직 대기열에 남은 2번은 popNext로 꺼내지 않았으니 순번이 0으로 당겨진다.
-    await expect(service.status(eventId, 2)).resolves.toEqual({ rank: 0, admitted: false });
+    await expect(service.status(eventId, 2)).resolves.toEqual({ rank: 0, admitted: false, etaSeconds: expectedEta(0) });
   });
 
   // 방문자가 이벤트 상세를 나갔다 재진입하면 프론트가 join을 다시 호출하는데,
@@ -88,12 +99,12 @@ describe('QueueService (통합 — 대기열 admission, ADR 0017)', () => {
     await service.join(eventId, 1);
     await service.popNext(eventId, 1); // 실제 허가 흐름(AdmissionProcessor)처럼 큐에서 뺀 뒤 허가
     await service.admit(eventId, 1);
-    await expect(service.status(eventId, 1)).resolves.toEqual({ rank: null, admitted: true });
+    await expect(service.status(eventId, 1)).resolves.toEqual({ rank: null, admitted: true, etaSeconds: null });
 
     await service.join(eventId, 2); // 다른 사람이 먼저 대기열에 서 있는 상태
     await service.join(eventId, 1); // 1번이 재입장(예: 페이지 재진입)
 
-    await expect(service.status(eventId, 1)).resolves.toEqual({ rank: 1, admitted: false });
+    await expect(service.status(eventId, 1)).resolves.toEqual({ rank: 1, admitted: false, etaSeconds: expectedEta(1) });
   });
 
   it('deactivateIfEmpty는 대기열이 비었을 때만 활성 목록에서 제거한다', async () => {
@@ -141,7 +152,39 @@ describe('QueueService (통합 — 대기열 admission, ADR 0017)', () => {
 
     await service.purge(eventId);
 
-    await expect(service.status(eventId, 1)).resolves.toEqual({ rank: null, admitted: false });
+    await expect(service.status(eventId, 1)).resolves.toEqual({ rank: null, admitted: false, etaSeconds: null });
     await expect(redis.sismember(ACTIVE_QUEUES_KEY, String(eventId))).resolves.toBe(0);
+  });
+
+  // ADR 0017 백로그(2026-08-15) — "허가되는 순간을 이벤트 기반으로 전환". 폴링
+  // 주기(1초)를 기다리지 않고, AdmissionProcessor가 방송하는 즉시 status를
+  // 다시 흘려보내는지 확인한다(폴링 자체는 그대로 유지되므로 admitted 스냅샷이
+  // 최소 2번 — 초기 폴링 1회 + 이벤트 트리거 1회 — 이상 나온다).
+  it('streamStatus는 입장 허가 이벤트가 오면 폴링 주기를 기다리지 않고 즉시 admitted 상태를 흘려보낸다', async () => {
+    await service.join(eventId, 1);
+
+    const snapshots$ = service.streamStatus(eventId, 1).pipe(take(2), toArray());
+    const snapshotsPromise = firstValueFrom(snapshots$);
+
+    await service.popNext(eventId, 1);
+    await service.admit(eventId, 1);
+    events.publish({ eventId, userId: 1 }); // AdmissionProcessor가 하는 것과 동일
+
+    const snapshots = await snapshotsPromise;
+    const admittedSnapshot = snapshots.find((s) => (s.data as { admitted: boolean }).admitted);
+    expect(admittedSnapshot).toBeDefined();
+    expect(admittedSnapshot!.data).toEqual({ rank: null, admitted: true, etaSeconds: null });
+  });
+
+  it('eta는 대기 순번이 몇 번째 입장 처리 배치에서 빠지는지를 반영한다', async () => {
+    // ADMISSION_BATCH_SIZE(20)명씩 들어가므로, 정확히 한 배치 크기만큼 앞서
+    // 대기 중인 사람은 다음 배치가 아니라 그다음 배치에서 빠진다.
+    await Promise.all(
+      Array.from({ length: ADMISSION_BATCH_SIZE + 1 }, (_, i) => service.join(eventId, i + 1)),
+    );
+
+    const last = await service.status(eventId, ADMISSION_BATCH_SIZE + 1);
+    expect(last.rank).toBe(ADMISSION_BATCH_SIZE); // 0-indexed, 배치 크기와 같은 순번 = 21번째
+    expect(last.etaSeconds).toBe(expectedEta(ADMISSION_BATCH_SIZE));
   });
 });
