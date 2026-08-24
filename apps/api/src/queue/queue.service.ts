@@ -4,7 +4,12 @@ import { merge, Observable, timer } from 'rxjs';
 import { map, switchMap } from 'rxjs/operators';
 import { RedisService } from '../redis/redis.service';
 import { QueueEventsService } from './queue-events.service';
-import { ACTIVE_QUEUES_KEY, ADMISSION_BATCH_SIZE, ADMISSION_INTERVAL_MS } from './queue.constants';
+import {
+  ACTIVE_QUEUES_KEY,
+  ADMISSION_BATCH_SIZE,
+  ADMISSION_INTERVAL_MS,
+  LOAD_TEST_ACTIVE_QUEUES_KEY,
+} from './queue.constants';
 
 // SSE 순번 확인 폴링 주기 — 0016 stats 대시보드와 같은 값(체감상 실시간, 구현은 단순).
 const STATUS_POLL_INTERVAL_MS = 1_000;
@@ -79,6 +84,19 @@ export class QueueService {
     await this.redis.sadd(ACTIVE_QUEUES_KEY, String(eventId));
   }
 
+  // 대용량 트래픽 테스트 이벤트 전용 진입(ADR 0016 백로그) — 대기열 자료구조
+  // (queue:event:{id} ZSet, admitted 키)는 join()과 완전히 똑같이 공유하지만
+  // (eventId가 다르니 어차피 안 섞인다), "어느 워커가 이 이벤트를 처리할지"를
+  // 가르는 활성 목록만 다른 Set(LOAD_TEST_ACTIVE_QUEUES_KEY)에 등록한다 — 캐주얼
+  // AdmissionProcessor와 LoadTestAdmissionProcessor가 같은 이벤트를 동시에
+  // ZPOPMIN하는 경합을 원천 차단하기 위해서다.
+  async joinLoadTest(eventId: number, userId: number): Promise<void> {
+    await this.redis.del(this.admittedKey(eventId, userId));
+    const seq = await this.redis.incr(this.queueSeqKey(eventId));
+    await this.redis.zadd(this.queueKey(eventId), 'NX', seq, String(userId));
+    await this.redis.sadd(LOAD_TEST_ACTIVE_QUEUES_KEY, String(eventId));
+  }
+
   // 실제 예매 시도(관문 도전) 직전에 반드시 통과해야 하는 체크. 실사용자(컨트롤러)와
   // 가상 유저(DemoService) 둘 다 이 메서드 하나를 거친다 — 특수 경로를 만들지 않는다.
   async assertAdmitted(eventId: number, userId: number): Promise<void> {
@@ -129,6 +147,12 @@ export class QueueService {
     return ids.map(Number);
   }
 
+  // LoadTestAdmissionProcessor 전용 — joinLoadTest()가 등록한 목록만 본다.
+  async activeLoadTestEventIds(): Promise<number[]> {
+    const ids = await this.redis.smembers(LOAD_TEST_ACTIVE_QUEUES_KEY);
+    return ids.map(Number);
+  }
+
   // ZPOPMIN은 [member1, score1, member2, score2, ...] 형태의 평평한 배열을 반환한다.
   async popNext(eventId: number, batchSize: number): Promise<number[]> {
     const popped = await this.redis.zpopmin(this.queueKey(eventId), batchSize);
@@ -161,12 +185,23 @@ export class QueueService {
     }
   }
 
-  // 데모 리셋(§DemoService.resetDemoEvent) 전용 — 아직 입장 허가를 못 받고
-  // 대기 중이던 사람들을 리셋 시점에 함께 비운다. 이미 허가를 받아 admitted 키를
-  // 들고 있는 사람은 그 키의 TTL(입장 허가창, 기본 8초)이 지나면 자연히
-  // assertAdmitted에서 막히므로 여기서 따로 안 지운다(짧은 TTL이라 유실돼도 무해).
+  // LoadTestAdmissionProcessor 전용 — 위와 동일한 로직, 다른 활성 목록을 정리한다.
+  async deactivateLoadTestIfEmpty(eventId: number): Promise<void> {
+    const size = await this.redis.zcard(this.queueKey(eventId));
+    if (size === 0) {
+      await this.redis.srem(LOAD_TEST_ACTIVE_QUEUES_KEY, String(eventId));
+    }
+  }
+
+  // 데모/대용량 테스트 리셋 공통 — 아직 입장 허가를 못 받고 대기 중이던 사람들을
+  // 리셋 시점에 함께 비운다. 이미 허가를 받아 admitted 키를 들고 있는 사람은
+  // 그 키의 TTL(입장 허가창, 기본 8초)이 지나면 자연히 assertAdmitted에서
+  // 막히므로 여기서 따로 안 지운다(짧은 TTL이라 유실돼도 무해). 이벤트가 어느
+  // 활성 목록에 속했든(캐주얼/대용량) 한쪽엔 없어도 srem은 안전한 no-op이라
+  // 호출부가 어느 쪽인지 몰라도 둘 다 지워서 안전하게 정리한다.
   async purge(eventId: number): Promise<void> {
     await this.redis.del(this.queueKey(eventId));
     await this.redis.srem(ACTIVE_QUEUES_KEY, String(eventId));
+    await this.redis.srem(LOAD_TEST_ACTIVE_QUEUES_KEY, String(eventId));
   }
 }

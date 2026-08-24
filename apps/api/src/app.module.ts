@@ -9,6 +9,7 @@ import { EventsModule } from './events/events.module';
 import { ReservationsModule } from './reservations/reservations.module';
 import { DemoModule } from './demo/demo.module';
 import { DemoGateGuard } from './demo/guards/demo-gate.guard';
+import { LoadTestModule } from './load-test/load-test.module';
 import { MetricsModule } from './metrics/metrics.module';
 import { AppController } from './app.controller';
 
@@ -40,6 +41,7 @@ import { AppController } from './app.controller';
     EventsModule,
     ReservationsModule,
     DemoModule,
+    LoadTestModule,
     MetricsModule,
   ],
   controllers: [AppController],

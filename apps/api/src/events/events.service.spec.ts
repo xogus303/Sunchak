@@ -123,6 +123,42 @@ describe('EventsService', () => {
     });
   });
 
+  describe('findOrCreateOwnLoadTestEvent', () => {
+    it('이미 내 대용량 테스트 이벤트가 있으면 totalQty를 무시하고 그대로 반환한다', async () => {
+      const existing = { id: 6, loadTestOwnerId: 1, isDemo: true };
+      prisma.event.findUnique.mockResolvedValue(existing);
+
+      await expect(
+        service.findOrCreateOwnLoadTestEvent(1, 9999),
+      ).resolves.toBe(existing);
+      expect(prisma.event.create).not.toHaveBeenCalled();
+      expect(redis.set).not.toHaveBeenCalled();
+    });
+
+    it('없으면 지정한 totalQty로 새로 만들고, isDemo:true로 표시해 공개 목록에서 숨긴다', async () => {
+      prisma.event.findUnique.mockResolvedValue(null);
+      const created = { id: 8, loadTestOwnerId: 1, isDemo: true };
+      prisma.event.create.mockResolvedValue(created);
+
+      await expect(
+        service.findOrCreateOwnLoadTestEvent(1, 5000),
+      ).resolves.toBe(created);
+      // 핵심: loadTestOwnerId로 소유자를 못박고, isDemo:true라야 findAll()의
+      // "isDemo:false 또는 demoOwnerId:내id" 필터 어느 쪽에도 안 걸려 일반
+      // 방문자·다른 유저에게 안 보인다.
+      expect(prisma.event.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            loadTestOwnerId: 1,
+            isDemo: true,
+            inventory: { create: { totalQty: 5000, remainingQty: 5000 } },
+          }),
+        }),
+      );
+      expect(redis.set).toHaveBeenCalledWith('stock:event:8', 5000);
+    });
+  });
+
   describe('findAll', () => {
     it('마감 이벤트와 내 데모 이벤트만 필터링해서 조회한다', async () => {
       prisma.event.findUnique.mockResolvedValue({ id: 5, demoOwnerId: 1 }); // 이미 내 데모 이벤트가 있는 상황

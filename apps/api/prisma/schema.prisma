@@ -56,28 +56,36 @@ model User {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  reservations Reservation[]
+  reservations     Reservation[]
   // 이 유저 전용 데모 이벤트(2026-08-07, 유저별 격리) — 1:1, 없을 수도 있다.
-  ownDemoEvent Event?        @relation("UserDemoEvent")
+  ownDemoEvent     Event?        @relation("UserDemoEvent")
+  // 이 유저 전용 대용량 트래픽 테스트 이벤트(ADR 0016 백로그) — 캐주얼 데모와
+  // 완전히 분리된 별도 1:1. 없을 수도 있다.
+  ownLoadTestEvent Event?        @relation("UserLoadTestEvent")
 
   @@map("users")
 }
 
 model Event {
-  id          Int         @id @default(autoincrement())
-  title       String
-  description String?
-  price       Int // 원(KRW) 정수. 통화 최소단위로 저장 — Float 금지(부동소수 오차).
-  openAt      DateTime // 티켓 오픈 시각
-  status      EventStatus @default(UPCOMING)
-  isDemo      Boolean     @default(false) // W4 공개 데모 모드(ADR 0016)가 리셋 대상을 식별하는 표식
+  id              Int         @id @default(autoincrement())
+  title           String
+  description     String?
+  price           Int // 원(KRW) 정수. 통화 최소단위로 저장 — Float 금지(부동소수 오차).
+  openAt          DateTime // 티켓 오픈 시각
+  status          EventStatus @default(UPCOMING)
+  isDemo          Boolean     @default(false) // W4 공개 데모 모드(ADR 0016)가 리셋 대상을 식별하는 표식
   // 이 데모 이벤트를 소유(=개인 테스트 샌드박스)한 유저(2026-08-07, 유저별 격리,
   // ADR 0017 개정) — isDemo:false인 일반 이벤트는 항상 null. @unique라 유저당
   // 데모 이벤트가 최대 1개로 강제된다(1:1).
-  demoOwnerId Int?        @unique
-  demoOwner   User?       @relation("UserDemoEvent", fields: [demoOwnerId], references: [id])
-  createdAt   DateTime    @default(now())
-  updatedAt   DateTime    @updatedAt
+  demoOwnerId     Int?        @unique
+  demoOwner       User?       @relation("UserDemoEvent", fields: [demoOwnerId], references: [id])
+  // 대용량 트래픽 테스트 전용 이벤트를 소유한 유저(ADR 0016 백로그) — 캐주얼
+  // 데모(demoOwnerId)와 완전히 별도 경로. isDemo/demoOwnerId가 있는 이벤트와는
+  // 절대 같은 행에 공존하지 않는다(둘 다 null이거나, 둘 중 하나만 값을 가짐).
+  loadTestOwnerId Int?        @unique
+  loadTestOwner   User?       @relation("UserLoadTestEvent", fields: [loadTestOwnerId], references: [id])
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
 
   // 재고는 별도 테이블로 분리 → 락 경합 범위를 좁힌다 (아래 Inventory 참고)
   inventory    Inventory?

@@ -12,3 +12,9 @@ export const ADMISSION_INTERVAL_MS = 2_000;
 // 대기열이 비어있지 않은 이벤트 id를 모아두는 Redis Set. 입장 처리 워커가 매 틱마다
 // "모든 이벤트"를 훑는 대신 이 목록만 훑도록 해 불필요한 조회를 줄인다.
 export const ACTIVE_QUEUES_KEY = 'queues:active';
+
+// 대용량 트래픽 테스트 이벤트 전용 활성 목록(ADR 0016 백로그) — 위 ACTIVE_QUEUES_KEY와
+// 완전히 별도다. AdmissionProcessor(캐주얼, 고정 20명/2초)와 LoadTestAdmissionProcessor
+// (변동 배치, load-test/load-test-admission.processor.ts)가 같은 이벤트를 동시에
+// 건드리면 ZPOPMIN 경합이 생기므로, 두 워커가 아예 다른 목록을 보게 나눠 원천 차단한다.
+export const LOAD_TEST_ACTIVE_QUEUES_KEY = 'queues:loadtest:active';

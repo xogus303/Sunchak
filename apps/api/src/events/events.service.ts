@@ -80,6 +80,42 @@ export class EventsService {
     return created;
   }
 
+  // 로그인한 유저 전용 대용량 트래픽 테스트 이벤트(ADR 0016 백로그) — 캐주얼
+  // 데모(findOrCreateOwnDemoEvent)와 완전히 별도 경로. loadTestOwnerId가
+  // @unique라 유저당 최대 1개만 존재한다. isDemo:true로 표시해 findAll()의
+  // 공개 목록(§46)에 안 섞이게 한다(isDemo:false만 목록에 노출되므로, 이
+  // 이벤트는 자기 자신의 대용량 테스트 화면에서만 접근한다).
+  //
+  // 이미 존재하면 totalQty를 무시하고 기존 이벤트를 그대로 돌려준다 — 재고를
+  // 바꾸려면 리셋(LoadTestService.reset)으로 명시적으로 재설정해야 한다(최초
+  // 생성 시점의 값이 계속 굳어버리는 걸 막기 위한 별도 경로).
+  async findOrCreateOwnLoadTestEvent(userId: number, totalQty: number) {
+    const existing = await this.prisma.event.findUnique({
+      where: { loadTestOwnerId: userId },
+      include: { inventory: true },
+    });
+    if (existing) return existing;
+
+    const created = await this.prisma.event.create({
+      data: {
+        title: '대용량 트래픽 테스트',
+        description: '재고·투입 인원을 직접 정해 대량 시뮬레이션을 실행합니다.',
+        price: 10000,
+        openAt: new Date(),
+        status: EventStatus.ON_SALE,
+        isDemo: true,
+        loadTestOwnerId: userId,
+        inventory: { create: { totalQty, remainingQty: totalQty } },
+      },
+      include: { inventory: true },
+    });
+    // findOrCreateOwnDemoEvent()와 동일한 이유로 필요 — 관문(0014)이 읽는
+    // Redis 재고 키를 여기서 안 심으면 ReconcileProcessor가 재계산할 때까지
+    // 모든 예매가 "재고가 부족합니다"로 실패한다.
+    await this.redis.set(`stock:event:${created.id}`, totalQty);
+    return created;
+  }
+
   // 공개 상세 — 없으면 404
   async findOne(id: number) {
     const event = await this.prisma.event.findUnique({
