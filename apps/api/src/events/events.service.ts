@@ -1,5 +1,5 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { EventStatus } from '@prisma/client';
+import { EventStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
 import { CreateEventDto } from './dto/create-event.dto';
@@ -89,6 +89,17 @@ export class EventsService {
   // 이미 존재하면 totalQty를 무시하고 기존 이벤트를 그대로 돌려준다 — 재고를
   // 바꾸려면 리셋(LoadTestService.reset)으로 명시적으로 재설정해야 한다(최초
   // 생성 시점의 값이 계속 굳어버리는 걸 막기 위한 별도 경로).
+  //
+  // ⚠️ 조회 후 생성(check-then-create)이라 그 자체로는 동시성에 안전하지 않다 —
+  // 캐주얼 데모(findOrCreateOwnDemoEvent)는 "/events" 목록 조회가 상세 페이지
+  // 진입보다 항상 먼저 이 메서드를 한 번 불러 이벤트를 만들어둬서 실제로는 안
+  // 겹쳤지만, 대용량 화면(/load-test)은 그런 선행 단계가 없어 페이지 진입 시
+  // stats 스트림과 "내 예매" 대기열 입장이 동시에 이 메서드를 처음 호출한다 —
+  // 두 요청이 똑같이 "없으니 만들자"로 판단해 동시에 create()를 시도하면
+  // loadTestOwnerId 유니크 제약(P2002)에서 하나가 500으로 죽는다(2026-08-26
+  // 브라우저 e2e로 실제 재현·발견). reservations.service.ts의 createHeld()가
+  // idempotencyKey 재전송을 다루는 것과 같은 방식 — 진 쪽은 죽지 않고 이긴
+  // 쪽이 방금 만든 행을 다시 조회해 반환한다.
   async findOrCreateOwnLoadTestEvent(userId: number, totalQty: number) {
     const existing = await this.prisma.event.findUnique({
       where: { loadTestOwnerId: userId },
@@ -96,24 +107,37 @@ export class EventsService {
     });
     if (existing) return existing;
 
-    const created = await this.prisma.event.create({
-      data: {
-        title: '대용량 트래픽 테스트',
-        description: '재고·투입 인원을 직접 정해 대량 시뮬레이션을 실행합니다.',
-        price: 10000,
-        openAt: new Date(),
-        status: EventStatus.ON_SALE,
-        isDemo: true,
-        loadTestOwnerId: userId,
-        inventory: { create: { totalQty, remainingQty: totalQty } },
-      },
-      include: { inventory: true },
-    });
-    // findOrCreateOwnDemoEvent()와 동일한 이유로 필요 — 관문(0014)이 읽는
-    // Redis 재고 키를 여기서 안 심으면 ReconcileProcessor가 재계산할 때까지
-    // 모든 예매가 "재고가 부족합니다"로 실패한다.
-    await this.redis.set(`stock:event:${created.id}`, totalQty);
-    return created;
+    try {
+      const created = await this.prisma.event.create({
+        data: {
+          title: '대용량 트래픽 테스트',
+          description: '재고·투입 인원을 직접 정해 대량 시뮬레이션을 실행합니다.',
+          price: 10000,
+          openAt: new Date(),
+          status: EventStatus.ON_SALE,
+          isDemo: true,
+          loadTestOwnerId: userId,
+          inventory: { create: { totalQty, remainingQty: totalQty } },
+        },
+        include: { inventory: true },
+      });
+      // findOrCreateOwnDemoEvent()와 동일한 이유로 필요 — 관문(0014)이 읽는
+      // Redis 재고 키를 여기서 안 심으면 ReconcileProcessor가 재계산할 때까지
+      // 모든 예매가 "재고가 부족합니다"로 실패한다.
+      await this.redis.set(`stock:event:${created.id}`, totalQty);
+      return created;
+    } catch (e) {
+      if (
+        e instanceof Prisma.PrismaClientKnownRequestError &&
+        e.code === 'P2002'
+      ) {
+        return this.prisma.event.findUniqueOrThrow({
+          where: { loadTestOwnerId: userId },
+          include: { inventory: true },
+        });
+      }
+      throw e;
+    }
   }
 
   // 공개 상세 — 없으면 404

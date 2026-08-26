@@ -22,7 +22,11 @@ import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
 import { ReservationsService } from '../reservations/reservations.service';
 import { PaymentsService } from '../reservations/payments.service';
-import { CONFIRM_QUEUE } from '../reservations/reservations.constants';
+import {
+  CONFIRM_QUEUE,
+  HELD_ACTIVITY_KEY,
+  HELD_ACTIVITY_TTL_MS,
+} from '../reservations/reservations.constants';
 import { QueueService } from '../queue/queue.service';
 import { QueueEventsService } from '../queue/queue-events.service';
 import { EventsService } from '../events/events.service';
@@ -445,6 +449,14 @@ export class DemoService {
           },
           orderBy: { createdAt: 'asc' },
         }),
+        // load-test.service.ts의 getStats()와 같은 이유로 추가(2026-08-27) —
+        // ReconcileProcessor(ADR 0021)가 "최근 예약 활동 없음"으로 판단하면
+        // 하루 한 번짜리 완화 모드로 빠지는데, 방문자가 이 stats 화면을 실시간
+        // 으로 보고 있는 동안은 재고가 순간적으로 음수로 튀어도(동시성 경합상
+        // 정상) 1분 안에 바로잡혀야 한다. 이 stats 쿼리 자체가 이미 매초
+        // Postgres를 두드리므로 이 한 줄로 비용이 늘지 않는다. 반환값은 안
+        // 쓰므로 구조분해 목록엔 안 넣는다.
+        this.redis.set(HELD_ACTIVITY_KEY, '1', 'PX', HELD_ACTIVITY_TTL_MS),
       ]);
 
     const sumOf = (status: ReservationStatus) =>
@@ -454,7 +466,11 @@ export class DemoService {
 
     return {
       totalQty,
-      remainingQty: Number(remaining ?? 0),
+      // load-test.service.ts의 getStats()와 같은 이유(2026-08-27) — 관문의
+      // Redis DECRBY는 동시 요청이 몰리면 보상(INCRBY) 전 찰나에 음수를 찍을
+      // 수 있는데, 방문자에게 "재고가 마이너스"로 보이면 안 된다. 표시용으로만
+      // 0 밑을 잘라낸다 — 관문이 참조하는 원본 Redis 값 자체는 안 건드린다.
+      remainingQty: Math.max(0, Number(remaining ?? 0)),
       heldCount: sumOf(ReservationStatus.HELD),
       confirmedCount: sumOf(ReservationStatus.CONFIRMED),
       queueBacklog: waiting + active,

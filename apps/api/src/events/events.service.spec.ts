@@ -1,5 +1,6 @@
 import { Test } from '@nestjs/testing';
 import { NotFoundException } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { EventsService } from './events.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
@@ -12,6 +13,7 @@ describe('EventsService', () => {
       create: jest.Mock;
       findMany: jest.Mock;
       findUnique: jest.Mock;
+      findUniqueOrThrow: jest.Mock;
     };
   };
   let redis: { set: jest.Mock };
@@ -22,6 +24,7 @@ describe('EventsService', () => {
         create: jest.fn(),
         findMany: jest.fn(),
         findUnique: jest.fn(),
+        findUniqueOrThrow: jest.fn(),
       },
     };
     redis = { set: jest.fn() };
@@ -156,6 +159,45 @@ describe('EventsService', () => {
         }),
       );
       expect(redis.set).toHaveBeenCalledWith('stock:event:8', 5000);
+    });
+
+    // 2026-08-26 브라우저 e2e로 발견 — /load-test 진입 시 stats 스트림과 "내
+    // 예매" 대기열 입장이 동시에 이 메서드를 처음 호출하면, 둘 다 "없으니
+    // 만들자"로 판단해 동시에 create()를 시도해 loadTestOwnerId 유니크
+    // 제약(P2002)에서 진 쪽이 500으로 죽었다. reservations.service.ts의
+    // createHeld() 재전송 처리와 같은 패턴으로 고쳤다 — 회귀 테스트.
+    it('동시에 두 요청이 생성을 시도해 유니크 제약(P2002)에 걸리면, 이긴 쪽이 만든 행을 다시 조회해 반환한다', async () => {
+      prisma.event.findUnique.mockResolvedValue(null); // 조회 시점엔 아직 없었음
+      prisma.event.create.mockRejectedValue(
+        new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+          code: 'P2002',
+          clientVersion: '6.19.3',
+        }),
+      );
+      const winnersEvent = { id: 8, loadTestOwnerId: 1, isDemo: true };
+      prisma.event.findUniqueOrThrow.mockResolvedValue(winnersEvent);
+
+      await expect(
+        service.findOrCreateOwnLoadTestEvent(1, 5000),
+      ).resolves.toBe(winnersEvent);
+      // 진 쪽은 500을 던지지 않고, 이긴 쪽이 만든 행을 loadTestOwnerId로 재조회한다.
+      expect(prisma.event.findUniqueOrThrow).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { loadTestOwnerId: 1 } }),
+      );
+      // 진 쪽은 Redis 재고 키를 심으면 안 된다 — 이긴 쪽이 이미 정확한
+      // totalQty로 심어놨는데, 진 쪽이 자기 totalQty(5000)로 덮어쓰면 두
+      // 요청의 totalQty가 다를 때 재고가 틀어질 수 있다.
+      expect(redis.set).not.toHaveBeenCalled();
+    });
+
+    it('P2002가 아닌 다른 에러는 그대로 던진다', async () => {
+      prisma.event.findUnique.mockResolvedValue(null);
+      const otherError = new Error('DB 연결 끊김');
+      prisma.event.create.mockRejectedValue(otherError);
+
+      await expect(
+        service.findOrCreateOwnLoadTestEvent(1, 5000),
+      ).rejects.toBe(otherError);
     });
   });
 

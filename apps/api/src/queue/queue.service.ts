@@ -23,6 +23,17 @@ export interface QueueStatus {
   etaSeconds: number | null;
 }
 
+// ETA 계산이 어떤 입장 처리 리듬을 가정해야 하는지 — 캐주얼(고정 배치)은 이
+// 모델 없이 기존 상수를 그대로 쓰고, 대용량(포아송 변동 배치)은 호출부
+// (LoadTestService)가 자기 설정값을 실어 넘긴다. LoadTestAdmissionProcessor의
+// poissonLikeBatchSize()가 실제로 쓰는 파라미터와 정확히 같은 이름·의미다.
+export interface AdmissionModel {
+  meanFraction: number;
+  minBatch: number;
+  maxBatch: number;
+  intervalMs: number;
+}
+
 /**
  * 선착순 입장 대기열(ADR 0017) — "언제 관문(0014)에 도전할 자격을 주는가"만
  * 관장한다. 관문·HELD·확정 파이프라인(0014/0015)은 이 서비스가 전혀 모른다.
@@ -109,18 +120,51 @@ export class QueueService {
   // 입장 처리 워커(AdmissionProcessor)가 실제로 하는 일 그대로를 계산에 반영한다 —
   // "초당 N명" 같은 연속 처리율 근사가 아니라, rank가 몇 번째 배치(ADMISSION_BATCH_SIZE명씩,
   // ADMISSION_INTERVAL_MS 주기)에서 빠지는지를 그대로 센다.
-  private eta(rank: number | null): number | null {
+  //
+  // ⚠️ 대용량(LoadTestAdmissionProcessor)은 고정 배치가 아니라 포아송 변동 배치
+  // (남은 인원의 meanFraction 비율, [minBatch,maxBatch]로 clamp)를 쓴다 — 이
+  // 고정 공식을 그대로 적용하면 실제 배출 속도와 안 맞아 ETA가 크게 틀리고,
+  // 매 틱 rank가 불규칙하게(포아송 배치 자체의 무작위성 + 계속 유입되는 신규
+  // 투입) 바뀌는 만큼 ETA도 덩달아 들쭉날쭉해진다(2026-08-26 실사용 중 발견 —
+  // "예상 대기가 분 단위였다가 52초였다가 30몇초였다가 한다"는 리포트). `model`을
+  // 안 넘기면(캐주얼) 기존 고정 공식 그대로 — 동작 변화 없음.
+  private eta(
+    rank: number | null,
+    waiting: number,
+    model?: AdmissionModel,
+  ): number | null {
     if (rank === null) return null;
-    const batchesAhead = Math.ceil((rank + 1) / ADMISSION_BATCH_SIZE);
-    return batchesAhead * (ADMISSION_INTERVAL_MS / 1000);
+    if (!model) {
+      const batchesAhead = Math.ceil((rank + 1) / ADMISSION_BATCH_SIZE);
+      return batchesAhead * (ADMISSION_INTERVAL_MS / 1000);
+    }
+    // poissonLikeBatchSize()와 같은 clamp 공식으로 "지금 이 순간" 기준 기대
+    // 배치 크기를 근사한다(무작위성 대신 평균값 사용) — 대기열이 줄어들며
+    // 매 틱 이 값도 같이 갱신되므로, 유입·배출 속도가 바뀌어도 그때그때
+    // 맞는 추정치를 낸다.
+    const expectedBatch = Math.min(
+      Math.max(waiting * model.meanFraction, model.minBatch),
+      model.maxBatch,
+    );
+    const batchesAhead = Math.ceil((rank + 1) / expectedBatch);
+    return batchesAhead * (model.intervalMs / 1000);
   }
 
-  async status(eventId: number, userId: number): Promise<QueueStatus> {
-    const [rank, admitted] = await Promise.all([
+  async status(
+    eventId: number,
+    userId: number,
+    admissionModel?: AdmissionModel,
+  ): Promise<QueueStatus> {
+    const [rank, admitted, waiting] = await Promise.all([
       this.redis.zrank(this.queueKey(eventId), String(userId)),
       this.redis.exists(this.admittedKey(eventId, userId)),
+      this.redis.zcard(this.queueKey(eventId)),
     ]);
-    return { rank, admitted: admitted === 1, etaSeconds: this.eta(rank) };
+    return {
+      rank,
+      admitted: admitted === 1,
+      etaSeconds: this.eta(rank, waiting, admissionModel),
+    };
   }
 
   // 폴링(1초 주기)만으로는 "대기 → 허가" 전환이 최대 1초 늦게 보인다. 확정 SSE(0006
@@ -128,13 +172,17 @@ export class QueueService {
   // 순간 폴링 틱을 기다리지 않고 즉시 재조회해 흘려보낸다. 대기 중 rank가 계속
   // 바뀌는 것까지 매번 이벤트로 방송하긴 번거로워 그건 폴링에 맡긴다(ADR 0017
   // 백로그, 2026-08-15에서 결정한 범위).
-  streamStatus(eventId: number, userId: number): Observable<MessageEvent> {
+  streamStatus(
+    eventId: number,
+    userId: number,
+    admissionModel?: AdmissionModel,
+  ): Observable<MessageEvent> {
     const polling$ = timer(0, STATUS_POLL_INTERVAL_MS).pipe(
-      switchMap(() => this.status(eventId, userId)),
+      switchMap(() => this.status(eventId, userId, admissionModel)),
     );
     const admitted$ = this.events
       .ofUser(eventId, userId)
-      .pipe(switchMap(() => this.status(eventId, userId)));
+      .pipe(switchMap(() => this.status(eventId, userId, admissionModel)));
     return merge(polling$, admitted$).pipe(
       map((status) => ({ data: status }) as MessageEvent),
     );
@@ -163,12 +211,17 @@ export class QueueService {
     return userIds;
   }
 
-  async admit(eventId: number, userId: number): Promise<void> {
+  // windowMs 옵셔널 — 안 넘기면(캐주얼) QUEUE_ADMISSION_WINDOW_MS(기본 8초) 그대로.
+  // 대용량(LoadTestAdmissionProcessor)은 자기 전용 값을 넘긴다(2026-08-26,
+  // 사용자 실사용 중 "예매 가능 시간이 너무 짧다"는 지적 — 8초는 원래 캐주얼
+  // 가상 유저의 반응 속도에 맞춰 정한 값이라 실제 사람이 대시보드를 읽고
+  // 누르기엔 촉박했다. 캐주얼과 공유하던 값을 분리해 대용량만 30초로).
+  async admit(eventId: number, userId: number, windowMs?: number): Promise<void> {
     await this.redis.set(
       this.admittedKey(eventId, userId),
       '1',
       'PX',
-      this.admissionWindowMs(),
+      windowMs ?? this.admissionWindowMs(),
     );
   }
 

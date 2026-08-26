@@ -6,18 +6,44 @@ import {
   HttpStatus,
   Injectable,
   Logger,
+  MessageEvent,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { EventStatus } from '@prisma/client';
+import { InjectQueue } from '@nestjs/bullmq';
+import { Queue } from 'bullmq';
+import { EventStatus, PaymentStatus, ReservationStatus } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
-import { firstValueFrom } from 'rxjs';
+import { Observable, firstValueFrom, timer } from 'rxjs';
+import { map, switchMap } from 'rxjs/operators';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
-import { QueueService } from '../queue/queue.service';
+import { AdmissionModel, QueueService } from '../queue/queue.service';
 import { QueueEventsService } from '../queue/queue-events.service';
 import { EventsService } from '../events/events.service';
 import { ReservationsService } from '../reservations/reservations.service';
 import { PaymentsService } from '../reservations/payments.service';
+import {
+  CONFIRM_QUEUE,
+  HELD_ACTIVITY_KEY,
+  HELD_ACTIVITY_TTL_MS,
+} from '../reservations/reservations.constants';
+
+// stats 스냅샷(캐주얼 데모의 DemoStats와 같은 목적) — 단, 개별 예매 목록
+// (tickets)은 뺐다. 대용량 테스트는 재고·VU가 최대 10,000까지 가능해서
+// 캐주얼 데모처럼 예매 건 하나하나를 매초 findMany+직렬화하면 부하가 커진다
+// (2026-08-26 사용자와 논의해 확정 — 이 화면은 집계 숫자/게이지만 보여준다).
+export interface LoadTestStats {
+  totalQty: number;
+  remainingQty: number;
+  heldCount: number;
+  confirmedCount: number;
+  queueBacklog: number;
+  paidCount: number;
+  failedCount: number;
+  soldOutCount: number;
+  abandonedCount: number;
+  admissionQueueCount: number;
+}
 
 // 리셋 없이 첫 simulate 호출로 이벤트가 자동 생성될 때의 기본 재고 — 캐주얼
 // 데모(findOrCreateOwnDemoEvent의 100)처럼 env로 뺄 만큼 운영 중 바뀔 값이
@@ -39,6 +65,10 @@ const DEFAULT_STOCK = 1_000;
 export class LoadTestService {
   private readonly logger = new Logger(LoadTestService.name);
 
+  // 캐주얼 데모(demo.service.ts)와 같은 주기 — 대량 테스트라고 더 촘촘히
+  // 볼 필요는 없고, 오히려 큰 숫자일수록 1초 단위 변화로도 충분히 체감된다.
+  private readonly STATS_POLL_INTERVAL_MS = 1000;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly redis: RedisService,
@@ -48,6 +78,7 @@ export class LoadTestService {
     private readonly queueEvents: QueueEventsService,
     private readonly reservations: ReservationsService,
     private readonly payments: PaymentsService,
+    @InjectQueue(CONFIRM_QUEUE) private readonly confirmQueue: Queue,
   ) {}
 
   // demo.service.ts의 DEMO_SIM_MAX_VU 등과 같은 이유로 env로 뺀다 — 배포 후
@@ -61,6 +92,28 @@ export class LoadTestService {
   }
   private maxStock(): number {
     return Number(this.config.get<string>('LOAD_TEST_MAX_STOCK') ?? 10_000);
+  }
+
+  // load-test-admission.processor.ts와 정확히 같은 env 키·기본값 — 순번 SSE의
+  // ETA 계산(QueueService.eta)이 실제 입장 처리 워커의 리듬을 그대로 반영하게
+  // 하려면 두 곳이 같은 값을 봐야 한다(2026-08-26, ETA가 캐주얼 고정 공식을
+  // 그대로 쓰다가 크게 틀렸던 버그를 고치며 추가 — 값 자체는 워커 쪽이 이미
+  // 갖고 있던 걸 여기서도 읽을 뿐, 새 설정이 아니다).
+  private admissionModel(): AdmissionModel {
+    return {
+      meanFraction: Number(
+        this.config.get<string>('LOAD_TEST_ADMISSION_MEAN_FRACTION') ?? 0.2,
+      ),
+      minBatch: Number(
+        this.config.get<string>('LOAD_TEST_ADMISSION_MIN_BATCH') ?? 50,
+      ),
+      maxBatch: Number(
+        this.config.get<string>('LOAD_TEST_ADMISSION_MAX_BATCH') ?? 1_000,
+      ),
+      intervalMs: Number(
+        this.config.get<string>('LOAD_TEST_ADMISSION_INTERVAL_MS') ?? 1_000,
+      ),
+    };
   }
 
   // 실제 예매 시도(Postgres에 INSERT가 꽂히는 페이스) — 여기가 이 기능의
@@ -280,5 +333,127 @@ export class LoadTestService {
     });
 
     return { event: updatedEvent, inventory };
+  }
+
+  // 실시간 결과 대시보드(demo.service.ts의 streamStats와 같은 구조) — 이벤트가
+  // 아직 없으면(리셋 전) DEFAULT_STOCK으로 자동 생성한다(simulateLoad와 동일한
+  // "최초 접근 시 준비" 관례).
+  //
+  // ⚠️ totalQty를 streamStats 시작 시 한 번만 읽어 클로저에 담아두지 않는다
+  // (demo.service.ts의 streamStats와 다른 점) — 캐주얼 데모는 리셋해도 항상
+  // 고정값(100)이라 안전했지만, 대량 테스트는 유저가 리셋마다 재고를 다르게
+  // 정할 수 있어서 SSE 연결이 열려 있는 동안 리셋하면 옛 값을 계속 흘려보내는
+  // 버그가 났다(2026-08-26, 브라우저 e2e로 실제로 재현·발견). getStats()가
+  // 매 틱 DB에서 새로 읽는다.
+  async streamStats(userId: number): Promise<Observable<MessageEvent>> {
+    const event = await this.eventsService.findOrCreateOwnLoadTestEvent(
+      userId,
+      DEFAULT_STOCK,
+    );
+    const eventId = event.id;
+
+    return timer(0, this.STATS_POLL_INTERVAL_MS).pipe(
+      switchMap(() => this.getStats(eventId)),
+      map((stats) => ({ data: stats }) as MessageEvent),
+    );
+  }
+
+  private async getStats(eventId: number): Promise<LoadTestStats> {
+    const [inventory, remaining, statusSums, waiting, active, paymentCounts, soldOut, abandoned, queued] =
+      await Promise.all([
+        this.prisma.inventory.findUnique({
+          where: { eventId },
+          select: { totalQty: true },
+        }),
+        this.redis.get(`stock:event:${eventId}`),
+        this.prisma.reservation.groupBy({
+          by: ['status'],
+          where: { eventId },
+          _sum: { quantity: true },
+        }),
+        this.confirmQueue.getWaitingCount(),
+        this.confirmQueue.getActiveCount(),
+        this.prisma.payment.groupBy({
+          by: ['status'],
+          where: { reservation: { eventId } },
+          _count: { _all: true },
+        }),
+        this.redis.get(`soldout:event:${eventId}`),
+        this.redis.get(`abandoned:event:${eventId}`),
+        this.queueService.size(eventId),
+        // ⚠️ ReconcileProcessor(ADR 0021)가 "최근 예약 활동이 없으면" 하루
+        // 한 번짜리 완화 모드로 빠진다 — 원래는 아무도 안 보는 유휴 시간의
+        // Neon 비용을 아끼려는 취지였는데, 대용량 테스트는 정반대로 "사람이
+        // 지금 이 화면을 실시간으로 보고 있는" 상황이라 그 취지와 안 맞는다.
+        // 방문자가 이 SSE를 열어두고 있는 한(매 틱) 활동 신호를 계속 갱신해서,
+        // 재고가 순간적으로 음수로 튀어도(동시성 경합상 정상) reconcile이 1분
+        // 안에 바로 바로잡게 한다(2026-08-27, "재고가 -2로 고정된다" 실사용
+        // 중 발견 — 이 신호가 90초 안에 안 갱신되면 다음 보정까지 최대 24시간
+        // 걸릴 수 있었다). 어차피 이 stats 쿼리 자체가 이미 매초 Postgres를
+        // 두드리고 있어(reservation.groupBy 등) 이 한 줄로 비용이 늘지 않는다.
+        // 반환값은 안 쓰므로 구조분해 목록엔 안 넣는다.
+        this.redis.set(HELD_ACTIVITY_KEY, '1', 'PX', HELD_ACTIVITY_TTL_MS),
+      ]);
+
+    const sumOf = (status: ReservationStatus) =>
+      statusSums.find((s) => s.status === status)?._sum.quantity ?? 0;
+    const countOf = (status: PaymentStatus) =>
+      paymentCounts.find((p) => p.status === status)?._count._all ?? 0;
+
+    return {
+      totalQty: inventory?.totalQty ?? 0,
+      // Redis 카운터(DECRBY 관문)는 동시 요청이 몰리면 보상(INCRBY)이 끝나기
+      // 전 찰나에 음수를 찍을 수 있다 — 이건 내부 구현상 정상이지만(관문
+      // 로직 자체가 이 값에 의존), 방문자에게 "재고가 마이너스"로 보이면
+      // 안 된다(2026-08-27 실사용 중 발견). 표시용으로만 0 밑을 잘라낸다 —
+      // 관문이 참조하는 원본 Redis 값 자체는 안 건드린다.
+      remainingQty: Math.max(0, Number(remaining ?? 0)),
+      heldCount: sumOf(ReservationStatus.HELD),
+      confirmedCount: sumOf(ReservationStatus.CONFIRMED),
+      queueBacklog: waiting + active,
+      paidCount: countOf(PaymentStatus.PAID),
+      failedCount: countOf(PaymentStatus.FAILED),
+      soldOutCount: Number(soldOut ?? 0),
+      abandonedCount: Number(abandoned ?? 0),
+      admissionQueueCount: queued,
+    };
+  }
+
+  // 방문자 본인이 대용량 이벤트의 대기열에 직접 들어가 순번을 받는다(2026-08-26,
+  // 캐주얼 데모의 booking-form.tsx와 동일한 1인칭 체험을 대용량에도 제공하기
+  // 위해 추가) — 지금까지 `/load-test`는 "가상 유저를 투입하고 집계만 지켜보는"
+  // 관리자 콘솔이었고, 방문자 본인이 대기열에 서보는 경로가 없었다.
+  //
+  // ⚠️ 캐주얼 전용 `queueService.join()`을 재사용하면 안 된다 — `ACTIVE_QUEUES_KEY`
+  // (AdmissionProcessor 전용)에 등록돼, `LoadTestAdmissionProcessor`가 이미
+  // 순회 중인 이벤트를 두 워커가 동시에 ZPOPMIN하는 경합이 재현된다(2026-08-25
+  // 세션이 이 둘을 완전히 분리한 이유 그대로). 반드시 `joinLoadTest()`를 쓴다.
+  //
+  // 프론트는 자기 이벤트 id를 미리 모르므로(캐주얼처럼 URL에 :eventId가 없다)
+  // 응답에 eventId를 실어 보낸다 — 이후 예매(`POST /events/:eventId/reservations`)
+  // 호출에 이 값을 그대로 쓴다.
+  async joinQueue(userId: number): Promise<{ eventId: number }> {
+    const event = await this.eventsService.findOrCreateOwnLoadTestEvent(
+      userId,
+      DEFAULT_STOCK,
+    );
+    await this.queueService.joinLoadTest(event.id, userId);
+    return { eventId: event.id };
+  }
+
+  // 순번/입장허가 스트림 자체(폴링·방송 구독 로직)는 이벤트-무관해 그대로
+  // 재사용하지만, ETA 계산은 대용량 전용 admissionModel을 반드시 넘겨야 한다 —
+  // 안 넘기면 QueueService가 캐주얼 고정 배치 공식으로 계산해 실제 배출
+  // 속도와 안 맞는 ETA가 나온다(위 admissionModel() 주석 참고).
+  async streamQueueStatus(userId: number): Promise<Observable<MessageEvent>> {
+    const event = await this.eventsService.findOrCreateOwnLoadTestEvent(
+      userId,
+      DEFAULT_STOCK,
+    );
+    return this.queueService.streamStatus(
+      event.id,
+      userId,
+      this.admissionModel(),
+    );
   }
 }

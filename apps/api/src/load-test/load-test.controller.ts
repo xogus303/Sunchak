@@ -1,4 +1,14 @@
-import { Body, Controller, HttpCode, HttpStatus, Post, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  HttpCode,
+  HttpStatus,
+  MessageEvent,
+  Post,
+  Sse,
+  UseGuards,
+} from '@nestjs/common';
+import { Observable } from 'rxjs';
 import { LoadTestService } from './load-test.service';
 import { ResetLoadTestDto } from './dto/reset-load-test.dto';
 import { SimulateLoadTestDto } from './dto/simulate-load-test.dto';
@@ -27,5 +37,29 @@ export class LoadTestController {
     @CurrentUser() user: { id: number },
   ) {
     return this.loadTestService.simulateLoad(dto.virtualUserCount, user.id);
+  }
+
+  // 실시간 결과 대시보드(demo.controller.ts의 stats/stream과 같은 목적).
+  @UseGuards(JwtAuthGuard)
+  @Sse('stats/stream')
+  statsStream(@CurrentUser() user: { id: number }): Promise<Observable<MessageEvent>> {
+    return this.loadTestService.streamStats(user.id);
+  }
+
+  // 방문자 본인이 대용량 이벤트 대기열에 직접 입장(2026-08-26, ADR 0017 패턴을
+  // 대용량에도 제공) — queue.controller.ts의 `/events/:eventId/queue`와 달리
+  // URL에 eventId가 없다(`/load-test/*`는 전부 "내 이벤트" 기준). 응답에
+  // eventId를 실어줘 프론트가 이후 예매 호출에 쓸 수 있게 한다.
+  @UseGuards(JwtAuthGuard)
+  @Post('queue')
+  @HttpCode(HttpStatus.ACCEPTED)
+  joinQueue(@CurrentUser() user: { id: number }) {
+    return this.loadTestService.joinQueue(user.id);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Sse('queue/stream')
+  queueStream(@CurrentUser() user: { id: number }): Promise<Observable<MessageEvent>> {
+    return this.loadTestService.streamQueueStatus(user.id);
   }
 }

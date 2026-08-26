@@ -17,7 +17,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
 import { ReservationsService } from '../reservations/reservations.service';
 import { PaymentsService } from '../reservations/payments.service';
-import { CONFIRM_QUEUE } from '../reservations/reservations.constants';
+import { CONFIRM_QUEUE, HELD_ACTIVITY_KEY } from '../reservations/reservations.constants';
 import { QueueService } from '../queue/queue.service';
 import { QueueEventsService } from '../queue/queue-events.service';
 import { AdmissionProcessor } from '../queue/admission.processor';
@@ -436,6 +436,29 @@ describe('DemoService (통합 — 데모 리셋)', () => {
       const created = await prisma.event.findUnique({ where: { demoOwnerId: userId } });
       expect(created).not.toBeNull();
       eventId = created!.id; // afterEach 정리 대상으로 등록
+    });
+
+    // load-test.service.spec.ts와 같은 이유(2026-08-27) — ReconcileProcessor가
+    // "최근 활동 없음"으로 판단하면 24시간짜리 완화 모드로 빠지는데, stats
+    // 화면을 실시간으로 보고 있는 동안엔 그러면 안 된다.
+    it('stats를 조회할 때마다 HELD_ACTIVITY_KEY를 갱신한다', async () => {
+      await redis.del(HELD_ACTIVITY_KEY);
+
+      await firstValueFrom(await service.streamStats(userId));
+
+      await expect(redis.exists(HELD_ACTIVITY_KEY)).resolves.toBe(1);
+    });
+
+    // load-test.service.spec.ts와 같은 이유(2026-08-27) — 관문 DECRBY가 찰나에
+    // 음수를 찍어도 방문자에게는 절대 마이너스로 보이면 안 된다.
+    it('Redis의 원본 재고 값이 음수여도 remainingQty는 0으로 표시한다', async () => {
+      const event = await createDemoEvent(10);
+      eventId = event.id;
+      await redis.set(stockKey(), '-2');
+
+      const msg = await firstValueFrom(await service.streamStats(userId));
+
+      expect(msg.data).toMatchObject({ remainingQty: 0 });
     });
 
     it('재고·HELD/CONFIRMED 합계·큐 적체·결제 성공/실패·재고소진·포기·티켓 목록을 스냅샷으로 흘려보낸다', async () => {

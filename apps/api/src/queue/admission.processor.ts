@@ -38,10 +38,19 @@ export class AdmissionProcessor extends WorkerHost implements OnModuleInit {
 
     for (const eventId of eventIds) {
       const userIds = await this.queueService.popNext(eventId, ADMISSION_BATCH_SIZE);
-      for (const userId of userIds) {
-        await this.queueService.admit(eventId, userId);
-        this.events.publish({ eventId, userId });
-      }
+      // ⚠️ 한 명씩 순차로 admit()을 기다리면(예전 for-await 방식), popNext로 이미
+      // 대기열에서 빠졌지만 아직 admit()이 안 끝난 사람은 그 틈 동안 rank도 null,
+      // admitted도 false인 "이도저도 아닌" 상태가 된다 — 그 순간 폴링(1초 주기)이
+      // 걸리면 프론트가 "허가창이 만료됐다"로 오판해 SSE 구독까지 끊어버린다
+      // (2026-08-26 실사용 중 발견 — 대용량은 배치가 최대 1000명이라 이 틈이
+      // 1초 넘게 벌어질 수 있어 특히 잘 걸렸다). Promise.all로 배치 전체를
+      // 동시에 admit()해 이 틈을 사실상 없앤다.
+      await Promise.all(
+        userIds.map(async (userId) => {
+          await this.queueService.admit(eventId, userId);
+          this.events.publish({ eventId, userId });
+        }),
+      );
       await this.queueService.deactivateIfEmpty(eventId);
     }
   }

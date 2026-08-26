@@ -261,6 +261,13 @@ export class ReservationsService {
           where: { userId_idempotencyKey: { userId, idempotencyKey } },
         });
       }
+      // ⚠️ P2002가 아닌 그 외 모든 에러(DB 연결 끊김·타임아웃·기타)는 INSERT
+      // 자체가 실패했다는 뜻 — 티켓이 실제로 확보되지 않았는데도 방금 DECRBY로
+      // 깎은 재고는 그대로 남아있었다(2026-08-27, 대량 동시 요청 중 재고 표시가
+      // 음수로 고정되는 걸 실사용 중 발견해 원인 추적 — 이 분기만 보상이
+      // 빠져 있었다). 대량 동시 요청 시 커넥션 풀 경합 등으로 이 분기를 실제로
+      // 탈 수 있으므로 반드시 되돌린 뒤 그대로 다시 던진다.
+      await this.redis.incrby(key, quantity);
       throw e;
     }
   }

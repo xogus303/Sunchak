@@ -39,6 +39,10 @@ describe('LoadTestAdmissionProcessor (통합 — 대용량 입장 처리, ADR 00
     // 1번 + 배경 자동 틱 최소 1번이 겹친 결과). 주기를 이 파일의 전체 실행
     // 시간보다 훨씬 길게 잡아 배경 틱이 절대 안 끼어들게 한다.
     process.env.LOAD_TEST_ADMISSION_INTERVAL_MS = '600000';
+    // 캐주얼 기본값(QUEUE_ADMISSION_WINDOW_MS=8000)과 뚜렷이 구분되는 값으로
+    // 둬서, admit()이 실제로 이 값을 쓰는지(캐주얼 기본값이 새지 않았는지)
+    // 아래 테스트에서 확인한다(2026-08-26).
+    process.env.LOAD_TEST_ADMISSION_WINDOW_MS = '5000';
 
     moduleRef = await Test.createTestingModule({
       imports: [
@@ -83,6 +87,7 @@ describe('LoadTestAdmissionProcessor (통합 — 대용량 입장 처리, ADR 00
     delete process.env.LOAD_TEST_ADMISSION_MIN_BATCH;
     delete process.env.LOAD_TEST_ADMISSION_MAX_BATCH;
     delete process.env.LOAD_TEST_ADMISSION_INTERVAL_MS;
+    delete process.env.LOAD_TEST_ADMISSION_WINDOW_MS;
     // ⚠️ admission.processor.spec.ts와 같은 이유로 obliterate()를 안 쓴다.
     await moduleRef.close();
   });
@@ -160,6 +165,20 @@ describe('LoadTestAdmissionProcessor (통합 — 대용량 입장 처리, ADR 00
     await expect(
       redis.sismember(LOAD_TEST_ACTIVE_QUEUES_KEY, String(eventId)),
     ).resolves.toBe(1);
+  });
+
+  // 2026-08-26 — "예매 가능 시간이 너무 짧다"는 실사용 피드백으로 캐주얼과
+  // 분리한 대용량 전용 허가창(LOAD_TEST_ADMISSION_WINDOW_MS).
+  it('허가창은 캐주얼 기본값(8초)이 아니라 LOAD_TEST_ADMISSION_WINDOW_MS(여기선 5초)를 쓴다', async () => {
+    await queueService.joinLoadTest(eventId, 1);
+
+    await processor.process({} as Job);
+
+    const pttl = await redis.pttl(`admitted:event:${eventId}:1`);
+    // 정확히 5000은 타이밍상 어려우니, 캐주얼 기본값(8000)과는 확실히 구분되는
+    // 대용량 설정값(5000) 근처인지만 확인한다.
+    expect(pttl).toBeGreaterThan(4000);
+    expect(pttl).toBeLessThanOrEqual(5000);
   });
 
   it('캐주얼 데모 활성 목록(ACTIVE_QUEUES_KEY)은 건드리지 않는다 — 완전히 별도 경로', async () => {

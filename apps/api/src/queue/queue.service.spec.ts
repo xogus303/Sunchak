@@ -54,6 +54,49 @@ describe('QueueService (통합 — 대기열 admission, ADR 0017)', () => {
     await expect(redis.sismember(ACTIVE_QUEUES_KEY, String(eventId))).resolves.toBe(1);
   });
 
+  // 2026-08-26 실사용 중 발견 — 대용량(포아송 변동 배치)인데 캐주얼 고정 배치
+  // 공식으로 ETA를 계산해 "예상 대기가 분 단위였다가 52초였다가 한다"는 버그.
+  // admissionModel을 넘기면 그 모델로 계산해야 한다.
+  describe('ETA — admissionModel을 넘기면(대용량) 캐주얼 고정 공식 대신 그 모델로 계산한다', () => {
+    it('대기열이 minBatch보다 작으면 minBatch로 clamp해서 계산한다', async () => {
+      await service.join(eventId, 1);
+      const model = { meanFraction: 0.2, minBatch: 50, maxBatch: 1000, intervalMs: 1000 };
+
+      // waiting=1 → expectedBatch = clamp(1*0.2, 50, 1000) = 50 → batchesAhead = ceil(1/50) = 1 → eta = 1초.
+      // 캐주얼 고정 공식(expectedEta(0))이었다면 다른 값이 나왔을 것 — 모델이 실제로 쓰였는지 확인.
+      await expect(service.status(eventId, 1, model)).resolves.toEqual({
+        rank: 0,
+        admitted: false,
+        etaSeconds: 1,
+      });
+    });
+
+    it('대기열이 충분히 크면(minBatch 이상) meanFraction 비율로 계산한다', async () => {
+      for (let i = 1; i <= 8; i++) {
+        await service.join(eventId, i);
+      }
+      const model = { meanFraction: 0.25, minBatch: 1, maxBatch: 1000, intervalMs: 500 };
+
+      // waiting=8 → expectedBatch = clamp(8*0.25=2, 1, 1000) = 2. 8번째 사람(rank 7)은
+      // batchesAhead = ceil(8/2) = 4 → eta = 4 * 0.5초 = 2초.
+      await expect(service.status(eventId, 8, model)).resolves.toEqual({
+        rank: 7,
+        admitted: false,
+        etaSeconds: 2,
+      });
+    });
+
+    it('admissionModel을 안 넘기면(캐주얼) 기존 고정 공식 그대로다', async () => {
+      await service.join(eventId, 1);
+
+      await expect(service.status(eventId, 1)).resolves.toEqual({
+        rank: 0,
+        admitted: false,
+        etaSeconds: expectedEta(0),
+      });
+    });
+  });
+
   it('두 번째로 join한 사람은 순번 1이다(먼저 온 사람이 앞)', async () => {
     await service.join(eventId, 1);
     await service.join(eventId, 2);
@@ -144,6 +187,21 @@ describe('QueueService (통합 — 대기열 admission, ADR 0017)', () => {
       ForbiddenException,
     );
     delete process.env.QUEUE_ADMISSION_WINDOW_MS; // 다음 테스트에 안 새게
+  });
+
+  // 2026-08-26 — 대용량은 캐주얼과 다른(더 긴) 허가창을 쓴다(LoadTestAdmissionProcessor가
+  // 이 파라미터로 넘김). env(QUEUE_ADMISSION_WINDOW_MS, 기본 8초)를 안 건드려도
+  // 파라미터가 우선해야 한다.
+  it('admit에 windowMs를 직접 넘기면 QUEUE_ADMISSION_WINDOW_MS 대신 그 값을 쓴다', async () => {
+    await service.join(eventId, 1);
+    await service.admit(eventId, 1, 50); // env 기본값(8초)보다 훨씬 짧게 직접 지정
+    await expect(service.assertAdmitted(eventId, 1)).resolves.toBeUndefined();
+
+    await new Promise((resolve) => setTimeout(resolve, 100)); // 지정한 50ms보다 넉넉히
+
+    await expect(service.assertAdmitted(eventId, 1)).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
   });
 
   it('purge는 대기 중인 사람을 비우고 활성 목록에서도 제거한다(데모 리셋용)', async () => {

@@ -7,6 +7,7 @@ import { LoadTestService } from './load-test.service';
 import { LoadTestController } from './load-test.controller';
 import { LoadTestAdmissionProcessor } from './load-test-admission.processor';
 import { LOAD_TEST_ADMISSION_QUEUE } from './load-test-admission.constants';
+import { CONFIRM_QUEUE } from '../reservations/reservations.constants';
 
 @Module({
   // EventsModule: findOrCreateOwnLoadTestEvent()로 "이 유저의 대용량 테스트
@@ -16,6 +17,8 @@ import { LOAD_TEST_ADMISSION_QUEUE } from './load-test-admission.constants';
   // 데모의 DemoModule과 같은 이유). sweep/reconcile(0015)과 같은 이유로
   // 대용량 전용 입장 처리도 재시도 백오프가 불필요하다 — 시간 자체가
   // 트리거라 이번 틱이 실패해도 다음 틱이 만회한다.
+  // 'confirm' 큐 registerQueue: demo.module.ts와 같은 이유(streamStats의 큐
+  // 적체 조회, getWaitingCount/getActiveCount만 읽고 job은 안 넣는다).
   imports: [
     EventsModule,
     QueueModule,
@@ -24,6 +27,7 @@ import { LOAD_TEST_ADMISSION_QUEUE } from './load-test-admission.constants';
       name: LOAD_TEST_ADMISSION_QUEUE,
       defaultJobOptions: { removeOnComplete: true, removeOnFail: false },
     }),
+    BullModule.registerQueue({ name: CONFIRM_QUEUE }),
   ],
   controllers: [LoadTestController],
   providers: [LoadTestService, LoadTestAdmissionProcessor],

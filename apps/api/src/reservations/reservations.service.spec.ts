@@ -166,6 +166,30 @@ describe('ReservationsService (통합 — held 흐름)', () => {
     });
   });
 
+  // 2026-08-27 실사용 중 발견 — 대량 동시 요청 상황에서 재고 표시가 음수로
+  // 고정되는 버그의 원인. P2002(재전송)만 보상하고 그 외 에러(DB 연결 끊김·
+  // 타임아웃 등)는 관문에서 깎은 Redis 재고를 되돌리지 않은 채 그대로
+  // 다시 던지고 있었다 — INSERT가 실패했으니 티켓은 확보 안 됐는데 재고만
+  // 영구히 깎여있는 상태가 남는다.
+  describe('DB INSERT가 P2002가 아닌 다른 이유로 실패하면', () => {
+    it('Redis 재고를 그대로 되돌린 뒤 원래 에러를 다시 던진다', async () => {
+      await seedStock(5);
+      const dbError = new Error('DB 연결이 끊겼습니다');
+      const createSpy = jest
+        .spyOn(prisma.reservation, 'create')
+        .mockRejectedValueOnce(dbError);
+
+      await expect(
+        service.create(eventId, userId, 1, 'held', randomUUID()),
+      ).rejects.toBe(dbError);
+
+      await expect(readStock()).resolves.toBe(5); // 4로 깎였다가 보상으로 5 복구
+      await expect(prisma.reservation.count()).resolves.toBe(0); // 예매 생성 안 됨
+
+      createSpy.mockRestore();
+    });
+  });
+
   describe('멱등성 키 누락', () => {
     it('held인데 idempotencyKey가 없으면 400을 던진다', async () => {
       await seedStock(5);

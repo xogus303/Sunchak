@@ -48,6 +48,15 @@ export class LoadTestAdmissionProcessor extends WorkerHost implements OnModuleIn
     );
   }
 
+  // 캐주얼(QUEUE_ADMISSION_WINDOW_MS, 기본 8초)과 공유하던 걸 분리(2026-08-26) —
+  // 8초는 원래 캐주얼 가상 유저의 반응 속도에 맞춘 값이라, 대용량 화면에서
+  // 순번·ETA·전체 현황을 읽고 "예매하기"를 누르기엔 실제 사람에게 촉박했다.
+  private admissionWindowMs(): number {
+    return Number(
+      this.config.get<string>('LOAD_TEST_ADMISSION_WINDOW_MS') ?? 30_000,
+    );
+  }
+
   async onModuleInit() {
     await this.admissionQueue.add(
       'admit',
@@ -69,10 +78,17 @@ export class LoadTestAdmissionProcessor extends WorkerHost implements OnModuleIn
       );
       if (batchSize > 0) {
         const userIds = await this.queueService.popNext(eventId, batchSize);
-        for (const userId of userIds) {
-          await this.queueService.admit(eventId, userId);
-          this.events.publish({ eventId, userId });
-        }
+        // admission.processor.ts(캐주얼)와 같은 이유로 Promise.all — 대용량은
+        // 배치가 최대 1000명까지 가능해, 한 명씩 순차로 기다리면 "대기열에서는
+        // 빠졌지만 아직 admit()이 안 끝난" 틈이 1초 넘게 벌어질 수 있다. 그 틈에
+        // 폴링이 걸리면 프론트가 "허가창 만료"로 오판한다(2026-08-26 실사용 중
+        // 발견 — 대용량 쪽이 배치가 커서 특히 잘 걸렸다).
+        await Promise.all(
+          userIds.map(async (userId) => {
+            await this.queueService.admit(eventId, userId, this.admissionWindowMs());
+            this.events.publish({ eventId, userId });
+          }),
+        );
       }
       await this.queueService.deactivateLoadTestIfEmpty(eventId);
     }
