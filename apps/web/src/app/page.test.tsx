@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import Home from "./page";
 import { FakeEventSource } from "../test/fake-event-source";
@@ -68,5 +68,50 @@ describe("Home (게이트/로그인/대시보드 분기)", () => {
     renderHome();
 
     await waitFor(() => expect(replaceMock).toHaveBeenCalledWith("/events"));
+  });
+
+  // fetch 자체가 거부되는 경우(API 서버 다운·네트워크 단절) — "확인 중..."에
+  // 조용히 멈추던 버그(2026-08-26) 회귀 테스트.
+  it("fetch 자체가 실패하면(네트워크 단절 등) 에러 안내와 재시도 버튼을 보여준다", async () => {
+    fetchMock.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    renderHome();
+
+    await screen.findByText("서버에 연결할 수 없습니다.");
+    expect(screen.getByRole("button", { name: "다시 시도" })).toBeInTheDocument();
+  });
+
+  it("재시도 버튼을 누르면 상태 확인을 다시 시도한다", async () => {
+    fetchMock.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    renderHome();
+    const retryButton = await screen.findByRole("button", { name: "다시 시도" });
+
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      json: async () => ({ message: "데모 게이트를 먼저 통과하세요." }),
+    });
+    fireEvent.click(retryButton);
+
+    await screen.findByLabelText("데모 공유 비밀번호");
+  });
+
+  // 서버가 여전히 안 떠 있어 재시도도 또 실패하는 경우(2026-08-26 실사용 중
+  // 발견) — 이전엔 "error" 상태가 "error"로 그대로 유지돼 화면이 안 바뀌어
+  // 버튼이 반응 없는 것처럼 보였다. "확인 중..."으로 먼저 되돌아가는지 확인.
+  it("재시도해도 서버가 여전히 안 떠 있으면, '확인 중...'을 거쳐 다시 에러를 보여준다", async () => {
+    fetchMock.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    renderHome();
+    const retryButton = await screen.findByRole("button", { name: "다시 시도" });
+
+    let rejectRetry!: (e: unknown) => void;
+    fetchMock.mockImplementationOnce(
+      () => new Promise((_, reject) => (rejectRetry = reject)),
+    );
+    fireEvent.click(retryButton);
+
+    // 재시도 응답이 오기 전엔 화면이 "확인 중..."으로 되돌아가 있어야 한다.
+    await screen.findByText("확인 중...");
+
+    rejectRetry(new TypeError("Failed to fetch"));
+    await screen.findByText("서버에 연결할 수 없습니다.");
   });
 });

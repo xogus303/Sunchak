@@ -8,9 +8,14 @@ export default function EventsPage() {
   return (
     <div className="flex flex-1 flex-col items-center gap-8 bg-zinc-50 px-6 py-16 dark:bg-black">
       <AutoHelpPopup />
-      <Link href="/" className="self-start text-sm text-zinc-500 hover:underline dark:text-zinc-400">
-        ← 대시보드로
-      </Link>
+      <div className="flex w-full max-w-2xl items-center justify-between">
+        <Link href="/" className="text-sm text-zinc-500 hover:underline dark:text-zinc-400">
+          ← 대시보드로
+        </Link>
+        <Link href="/load-test" className="text-sm text-zinc-500 hover:underline dark:text-zinc-400">
+          대용량 트래픽 테스트 →
+        </Link>
+      </div>
       <EventList />
     </div>
   );

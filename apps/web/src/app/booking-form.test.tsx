@@ -4,6 +4,13 @@ import { render, screen, fireEvent, act } from "@testing-library/react";
 import { BookingForm } from "./booking-form";
 import { FakeEventSource } from "../test/fake-event-source";
 
+// 게이트/로그인 세션 만료 시 루트로 돌려보내는지 확인하려면 useRouter가 필요하다
+// (page.test.tsx와 같은 패턴).
+const pushMock = vi.fn();
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: pushMock }),
+}));
+
 function queueSource() {
   return FakeEventSource.instances.find((s) => s.url.includes("/queue/stream"));
 }
@@ -45,6 +52,7 @@ describe("BookingForm (대기열 → 예매 → 결제, ADR 0017/0018)", () => {
 
   beforeEach(() => {
     fetchMock.mockReset();
+    pushMock.mockReset();
     FakeEventSource.instances = [];
     vi.stubGlobal("fetch", fetchMock);
     vi.stubGlobal("EventSource", FakeEventSource);
@@ -58,7 +66,12 @@ describe("BookingForm (대기열 → 예매 → 결제, ADR 0017/0018)", () => {
     fetchMock.mockImplementation(
       baseFetchMock((u) => (u.includes("/queue") ? Promise.resolve({ ok: true, json: async () => ({}) }) : null)),
     );
-    render(<BookingForm eventId={1} eventTitle="선착순 데모 콘서트" />);
+    render(<BookingForm
+      eventId={1}
+      eventTitle="선착순 데모 콘서트"
+      joinQueueUrl="/events/1/queue"
+      queueStreamUrl="/events/1/queue/stream"
+    />);
 
     await screen.findByText("내 예매 — 선착순 데모 콘서트");
     await findByRank(0);
@@ -81,7 +94,12 @@ describe("BookingForm (대기열 → 예매 → 결제, ADR 0017/0018)", () => {
     fetchMock.mockImplementation(
       baseFetchMock((u) => (u.includes("/queue") ? Promise.resolve({ ok: true, json: async () => ({}) }) : null)),
     );
-    render(<BookingForm eventId={1} eventTitle="선착순 데모 콘서트" />);
+    render(<BookingForm
+      eventId={1}
+      eventTitle="선착순 데모 콘서트"
+      joinQueueUrl="/events/1/queue"
+      queueStreamUrl="/events/1/queue/stream"
+    />);
 
     await screen.findByText("내 예매 — 선착순 데모 콘서트");
     await findByRank(0);
@@ -108,7 +126,12 @@ describe("BookingForm (대기열 → 예매 → 결제, ADR 0017/0018)", () => {
     );
     render(
       <StrictMode>
-        <BookingForm eventId={1} eventTitle="선착순 데모 콘서트" />
+        <BookingForm
+      eventId={1}
+      eventTitle="선착순 데모 콘서트"
+      joinQueueUrl="/events/1/queue"
+      queueStreamUrl="/events/1/queue/stream"
+    />
       </StrictMode>,
     );
 
@@ -132,7 +155,12 @@ describe("BookingForm (대기열 → 예매 → 결제, ADR 0017/0018)", () => {
         return null;
       }),
     );
-    render(<BookingForm eventId={1} eventTitle="선착순 데모 콘서트" />);
+    render(<BookingForm
+      eventId={1}
+      eventTitle="선착순 데모 콘서트"
+      joinQueueUrl="/events/1/queue"
+      queueStreamUrl="/events/1/queue/stream"
+    />);
 
     await screen.findByText("내 예매 — 선착순 데모 콘서트");
     await findByRank(0);
@@ -173,7 +201,12 @@ describe("BookingForm (대기열 → 예매 → 결제, ADR 0017/0018)", () => {
         return null;
       }),
     );
-    render(<BookingForm eventId={1} eventTitle="선착순 데모 콘서트" />);
+    render(<BookingForm
+      eventId={1}
+      eventTitle="선착순 데모 콘서트"
+      joinQueueUrl="/events/1/queue"
+      queueStreamUrl="/events/1/queue/stream"
+    />);
     await waitUntilAdmitted();
 
     fireEvent.click(screen.getByRole("button", { name: "예매하기" }));
@@ -205,7 +238,12 @@ describe("BookingForm (대기열 → 예매 → 결제, ADR 0017/0018)", () => {
     fetchMock.mockImplementation(
       baseFetchMock((u) => (u.includes("/queue") ? Promise.resolve({ ok: true, json: async () => ({}) }) : null)),
     );
-    render(<BookingForm eventId={1} eventTitle="선착순 데모 콘서트" />);
+    render(<BookingForm
+      eventId={1}
+      eventTitle="선착순 데모 콘서트"
+      joinQueueUrl="/events/1/queue"
+      queueStreamUrl="/events/1/queue/stream"
+    />);
 
     await screen.findByText("내 예매 — 선착순 데모 콘서트");
     await findByRank(0);
@@ -226,7 +264,12 @@ describe("BookingForm (대기열 → 예매 → 결제, ADR 0017/0018)", () => {
         return null;
       }),
     );
-    render(<BookingForm eventId={1} eventTitle="선착순 데모 콘서트" />);
+    render(<BookingForm
+      eventId={1}
+      eventTitle="선착순 데모 콘서트"
+      joinQueueUrl="/events/1/queue"
+      queueStreamUrl="/events/1/queue/stream"
+    />);
 
     await screen.findByText("내 예매 — 선착순 데모 콘서트");
     await findByRank(0);
@@ -251,10 +294,132 @@ describe("BookingForm (대기열 → 예매 → 결제, ADR 0017/0018)", () => {
           : null,
       ),
     );
-    render(<BookingForm eventId={1} eventTitle="선착순 데모 콘서트" />);
+    render(<BookingForm
+      eventId={1}
+      eventTitle="선착순 데모 콘서트"
+      joinQueueUrl="/events/1/queue"
+      queueStreamUrl="/events/1/queue/stream"
+    />);
 
     await screen.findByText("내 예매 — 선착순 데모 콘서트");
     await screen.findByText("Unauthorized");
     expect(screen.getByRole("button", { name: "다시 시도" })).toBeInTheDocument();
+  });
+
+  // 2026-08-27 실사용 중 발견 — 게이트 토큰(로그인과 별개의 막)이 장시간
+  // 테스트로 만료되면, "다시 시도"가 같은 예매 액션을 그대로 재실행해 매번
+  // 똑같은 만료 에러만 반복됐다("다시 시도할 수 없다"는 리포트). 이 경우는
+  // 루트로 돌려보내야 한다.
+  it("게이트 토큰이 만료되면 '다시 시도' 대신 루트로 돌려보내는 버튼을 보여준다", async () => {
+    fetchMock.mockImplementation(
+      baseFetchMock((u) =>
+        u.includes("/queue")
+          ? Promise.resolve({ ok: false, json: async () => ({ message: "유효하지 않거나 만료된 데모 토큰입니다." }) })
+          : null,
+      ),
+    );
+    render(<BookingForm
+      eventId={1}
+      eventTitle="선착순 데모 콘서트"
+      joinQueueUrl="/events/1/queue"
+      queueStreamUrl="/events/1/queue/stream"
+    />);
+
+    await screen.findByText("유효하지 않거나 만료된 데모 토큰입니다.");
+    expect(screen.queryByRole("button", { name: "다시 시도" })).not.toBeInTheDocument();
+    const retryButton = screen.getByRole("button", { name: "처음부터 다시 시작하기" });
+
+    fireEvent.click(retryButton);
+    expect(pushMock).toHaveBeenCalledWith("/");
+  });
+
+  it("로그인 세션의 유저 계정을 더 이상 찾을 수 없으면(JWT는 유효하나 DB에 없음) 루트로 돌려보내는 버튼을 보여준다", async () => {
+    fetchMock.mockImplementation(
+      baseFetchMock((u) =>
+        u.includes("/queue")
+          ? Promise.resolve({ ok: false, json: async () => ({ message: "이 계정을 더 이상 찾을 수 없습니다. 다시 로그인해 주세요." }) })
+          : null,
+      ),
+    );
+    render(<BookingForm
+      eventId={1}
+      eventTitle="선착순 데모 콘서트"
+      joinQueueUrl="/events/1/queue"
+      queueStreamUrl="/events/1/queue/stream"
+    />);
+
+    await screen.findByText("이 계정을 더 이상 찾을 수 없습니다. 다시 로그인해 주세요.");
+    const retryButton = screen.getByRole("button", { name: "처음부터 다시 시작하기" });
+
+    fireEvent.click(retryButton);
+    expect(pushMock).toHaveBeenCalledWith("/");
+  });
+
+  // 대용량 트래픽 테스트(/load-test, 2026-08-26)도 캐주얼과 같은 1인칭 대기열
+  // 체험을 준다 — 단 eventId를 URL이 아니라 join 응답으로 받고, 크라우드는
+  // "가상 유저 투입" 버튼으로 유저가 직접 통제하므로 자동 투입은 꺼져 있다.
+  describe("대용량 모드(eventId 없이, autoInjectCrowd=false)", () => {
+    it("마운트 시 크라우드 자동 투입 없이 곧바로 본인만 대기열에 입장한다", async () => {
+      fetchMock.mockImplementation(async (u: string) => {
+        if (u.toString().includes("/demo/simulate")) {
+          throw new Error("대용량 모드는 크라우드를 자동 투입하면 안 된다");
+        }
+        if (u.toString().includes("/load-test/queue")) {
+          return { ok: true, json: async () => ({ eventId: 42 }) };
+        }
+        throw new Error(`이 테스트에서 예상하지 못한 fetch: ${u}`);
+      });
+      render(
+        <BookingForm
+          eventTitle="대용량 트래픽 테스트"
+          joinQueueUrl="/load-test/queue"
+          queueStreamUrl="/load-test/queue/stream"
+          autoInjectCrowd={false}
+        />,
+      );
+
+      await screen.findByText("내 예매 — 대용량 트래픽 테스트");
+      await findByRank(0);
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/load-test/queue"),
+        expect.objectContaining({ method: "POST" }),
+      );
+    });
+
+    it("join 응답으로 받은 eventId를 예매 생성에 그대로 쓴다", async () => {
+      // 순번/허가 스트림은 EventSource가 처리해 fetch를 안 타므로 여기 mock할 필요 없다.
+      fetchMock.mockImplementation(async (u: string) => {
+        const url = u.toString();
+        if (url.includes("/load-test/queue")) {
+          return { ok: true, json: async () => ({ eventId: 42 }) };
+        }
+        if (url.includes("/reservations")) {
+          return { ok: true, json: async () => ({ id: 999, status: "HELD" }) };
+        }
+        throw new Error(`이 테스트에서 예상하지 못한 fetch: ${url}`);
+      });
+      render(
+        <BookingForm
+          eventTitle="대용량 트래픽 테스트"
+          joinQueueUrl="/load-test/queue"
+          queueStreamUrl="/load-test/queue/stream"
+          autoInjectCrowd={false}
+        />,
+      );
+
+      await screen.findByText("내 예매 — 대용량 트래픽 테스트");
+      await findByRank(0);
+      const source = FakeEventSource.instances.find((s) => s.url.includes("/load-test/queue/stream"));
+      act(() => source?.emit({ rank: null, admitted: true }));
+      await screen.findByText("지금 예매하세요 — 수량");
+
+      fireEvent.click(screen.getByRole("button", { name: "예매하기" }));
+
+      await screen.findByText("🎫 1매");
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/events/42/reservations?strategy=held"),
+        expect.objectContaining({ method: "POST" }),
+      );
+    });
   });
 });

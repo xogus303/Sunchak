@@ -1,8 +1,25 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { apiFetch, apiUrl } from "@/lib/api";
 import { TicketCard } from "./ticket-card";
+
+// 게이트 토큰·로그인 세션이 만료됐을 때의 에러 메시지 판별 — page.tsx의
+// checkStatus()가 이미 같은 문자열 판별로 게이트/로그인을 구분하고 있다
+// (약한 결합이지만 이미 있는 패턴을 재사용). 이 경우는 "다시 시도"(같은
+// 예매 액션 재실행)로는 절대 안 풀린다 — 게이트를 다시 통과하거나 재로그인
+// 해야 하므로 루트로 돌려보내야 한다(2026-08-27, "다시 시도해도 계속 같은
+// 토큰 만료 에러만 반복된다" 실사용 중 발견 — 장시간 테스트 시 JWT(1h)가
+// 만료되는데 booking-form의 재시도 버튼은 이 경우를 구분 못 하고 매번 같은
+// 실패를 반복시켰다).
+function needsReauth(message: string): boolean {
+  return (
+    message.includes("게이트") ||
+    message.includes("토큰") ||
+    message.includes("계정을 더 이상 찾을 수 없습니다")
+  );
+}
 
 // 대기열 SSE 스냅샷(백엔드 QueueStatus, ADR 0017)과 모양을 맞춘다.
 interface QueueSnapshot {
@@ -18,8 +35,21 @@ function formatEta(etaSeconds: number): string {
 }
 
 interface BookingFormProps {
-  eventId: number;
+  // 캐주얼(events/[id]/page.tsx)은 처음부터 eventId를 안다. 대용량(/load-test)은
+  // URL에 :eventId가 없어 모른다 — joinQueueUrl 응답의 eventId로 나중에 채운다
+  // (2026-08-26, ADR 0016 백로그 — 대용량에도 캐주얼과 동일한 1인칭 대기열 체험 제공).
+  eventId?: number;
   eventTitle: string;
+  joinQueueUrl: string;
+  queueStreamUrl: string;
+  // 캐주얼은 마운트 시 랜덤 규모(5~100명) 가상 유저를 자동 투입해 경쟁 상황을
+  // 만든다. 대용량은 이미 "가상 유저 투입" 버튼으로 유저가 직접 규모를 정하므로
+  // 여기서 또 자동 투입하면 중복·간섭이라 끈다. 기본값 true = 캐주얼 동작 유지.
+  autoInjectCrowd?: boolean;
+  // 상위 화면이 좌우 패널을 "나의 상황"/"전체 현황" 식으로 구획할 때 붙이는
+  // 눈에 띄는 라벨(2026-08-26, /load-test UI 개선 — 사용자가 Artifact 목업
+  // 옵션 B를 선택). 캐주얼(events/[id]/page.tsx)은 안 넘겨 기존 모습 그대로.
+  sectionLabel?: string;
 }
 
 // "대기열 진입부터 결제·확정까지" 한 패널에서 계속 보여주는 상태 하나로 표현한다
@@ -44,13 +74,24 @@ type FlowState =
 
 // 판매중인 이벤트로 진입했을 때만 렌더된다 — eventId/eventTitle은 호출부
 // (app/events/[id]/page.tsx)가 이미 ON_SALE로 확인한 뒤 넘겨준다.
-export function BookingForm({ eventId, eventTitle }: BookingFormProps) {
+export function BookingForm({
+  eventId,
+  eventTitle,
+  joinQueueUrl,
+  queueStreamUrl,
+  autoInjectCrowd = true,
+  sectionLabel,
+}: BookingFormProps) {
+  const router = useRouter();
   // 문자열로 따로 들고 있는다 — 전부 지웠을 때 Number("")=0이 강제로 필드에
   // "0"으로 박히면서 이어 치면 "0100"처럼 붙는 문제를 피한다(demo-dashboard.tsx와 동일).
   const [qtyInput, setQtyInput] = useState("1");
   const quantity = qtyInput === "" ? 0 : Number(qtyInput);
   const [pending, setPending] = useState(false);
   const [state, setState] = useState<FlowState>({ phase: "idle" });
+  // eventId prop이 없으면(대용량) join 응답이 알려줄 때까지 모른다 — 예매
+  // 생성(`POST /events/:eventId/reservations`)이 이 값을 쓴다.
+  const [resolvedEventId, setResolvedEventId] = useState<number | null>(eventId ?? null);
 
   // 대기열 순번/입장 허가 SSE(ADR 0017) — "예매하기"를 누르는 순간(held로 전환)
   // 이후엔 이 예매 시도 자체가 이미 서버에서 검증된 것이라 더 볼 필요가 없다.
@@ -58,7 +99,7 @@ export function BookingForm({ eventId, eventTitle }: BookingFormProps) {
   useEffect(() => {
     if (!isWaitingForAdmission) return;
 
-    const source = new EventSource(apiUrl(`/events/${eventId}/queue/stream`), {
+    const source = new EventSource(apiUrl(queueStreamUrl), {
       withCredentials: true,
     });
     source.onmessage = (e) => {
@@ -73,10 +114,10 @@ export function BookingForm({ eventId, eventTitle }: BookingFormProps) {
       }
     };
     return () => source.close();
-  }, [eventId, isWaitingForAdmission]);
+  }, [queueStreamUrl, isWaitingForAdmission]);
 
   const handleJoinQueue = useCallback(async () => {
-    const res = await apiFetch(`/events/${eventId}/queue`, { method: "POST" });
+    const res = await apiFetch(joinQueueUrl, { method: "POST" });
     if (!res.ok) {
       // /events/[id]가 별도 페이지로 분리되며(2026-08-06) 로그인 전에도 이 화면에
       // 올 수 있게 됐다 — 로그인 안 된 상태로 누르면 서버가 401을 준다.
@@ -84,8 +125,11 @@ export function BookingForm({ eventId, eventTitle }: BookingFormProps) {
       setState({ phase: "error", message: body?.message ?? "대기열 입장에 실패했습니다." });
       return;
     }
+    // 대용량(eventId prop 없음)은 이 응답이 처음으로 eventId를 알려준다.
+    const body = await res.json().catch(() => null);
+    if (body?.eventId != null) setResolvedEventId(body.eventId);
     setState({ phase: "queued", rank: 0, etaSeconds: null });
-  }, [eventId]);
+  }, [joinQueueUrl]);
 
   // 방문자가 이 이벤트를 선택하는 순간(마운트 시점) 자동으로 소규모~중간
   // 랜덤 규모(5~100명)의 가상 유저를 먼저 흘려보내 실제 경쟁 상황을 만들고,
@@ -93,6 +137,9 @@ export function BookingForm({ eventId, eventTitle }: BookingFormProps) {
   // 아니라 들어오자마자 선착순 경쟁을 몸으로 느끼게 하려는 목적(2026-08-07).
   // 순번 자체를 조작하는 게 아니라, 경쟁 인원수를 랜덤화해서 매번 다른 순번이
   // "실제로" 부여되게 한다 — ADR 0017의 "가짜 우선순위 없음" 원칙은 그대로 유지.
+  // autoInjectCrowd=false(대용량)면 이 랜덤 크라우드 투입은 건너뛰고 곧바로
+  // 본인만 대기열에 입장한다 — 대용량은 "가상 유저 투입" 버튼으로 유저가 직접
+  // 규모를 정하므로, 여기서 또 자동으로 투입하면 그 통제와 충돌한다(2026-08-26).
   // handleJoinQueue를 그대로 호출하지 않고 fetch·then 콜백 안에서 setState하는
   // 형태로 풀어 쓴 이유 — react-hooks/set-state-in-effect 린트가 "effect 본문에서
   // setState하는 함수를 직접 호출하는 패턴"을 지적해서, "외부 이벤트(fetch 응답)에
@@ -125,27 +172,34 @@ export function BookingForm({ eventId, eventTitle }: BookingFormProps) {
     hasStartedRef.current = true;
 
     const crowdSize = Math.floor(Math.random() * 96) + 5; // 5~100명
-    apiFetch("/demo/simulate", {
-      method: "POST",
-      body: JSON.stringify({ virtualUserCount: crowdSize, auto: true }),
-    })
-      .catch(() => {}) // 쿨다운(429) 등은 조용히 무시 — 방금 다른 방문자가 이미 투입했을 뿐
-      .then(() =>
-        apiFetch(`/events/${eventId}/queue`, { method: "POST" }).then(async (res) => {
-          if (!res.ok) {
-            const body = await res.json().catch(() => null);
-            setState({ phase: "error", message: body?.message ?? "대기열 입장에 실패했습니다." });
-            return;
-          }
-          setState({ phase: "queued", rank: 0, etaSeconds: null });
-        }),
-      );
-  }, [eventId]);
+    const prep = autoInjectCrowd
+      ? apiFetch("/demo/simulate", {
+          method: "POST",
+          body: JSON.stringify({ virtualUserCount: crowdSize, auto: true }),
+        }).catch(() => {}) // 쿨다운(429) 등은 조용히 무시 — 방금 다른 방문자가 이미 투입했을 뿐
+      : Promise.resolve();
+
+    prep.then(() =>
+      apiFetch(joinQueueUrl, { method: "POST" }).then(async (res) => {
+        if (!res.ok) {
+          const body = await res.json().catch(() => null);
+          setState({ phase: "error", message: body?.message ?? "대기열 입장에 실패했습니다." });
+          return;
+        }
+        const body = await res.json().catch(() => null);
+        if (body?.eventId != null) setResolvedEventId(body.eventId);
+        setState({ phase: "queued", rank: 0, etaSeconds: null });
+      }),
+    );
+  }, [joinQueueUrl, autoInjectCrowd]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setPending(true);
-    const res = await apiFetch(`/events/${eventId}/reservations?strategy=held`, {
+    // admitted 단계에 도달했다는 건 join이 이미 성공해 resolvedEventId가 채워져
+    // 있다는 뜻이다(캐주얼은 처음부터, 대용량은 join 응답으로 — 둘 다 이 지점
+    // 이전에 확정됨).
+    const res = await apiFetch(`/events/${resolvedEventId}/reservations?strategy=held`, {
       method: "POST",
       body: JSON.stringify({ quantity, idempotencyKey: crypto.randomUUID() }),
     });
@@ -199,21 +253,33 @@ export function BookingForm({ eventId, eventTitle }: BookingFormProps) {
   }, [reservationId, inFlightQuantity]);
 
   return (
-    <div className="flex w-full max-w-2xl flex-col gap-3 rounded-lg border border-zinc-200 p-4 dark:border-zinc-800">
-      <h2 className="text-sm font-medium text-zinc-700 dark:text-zinc-300">내 예매 — {eventTitle}</h2>
-
-      {state.phase === "idle" && (
-        <p className="text-sm text-zinc-500">대기열 입장 중...</p>
+    <div className="flex w-full max-w-2xl flex-col gap-3">
+      {sectionLabel && (
+        <div className="flex items-center gap-2">
+          <span className="h-4 w-1 rounded-sm bg-zinc-950 dark:bg-zinc-50" />
+          <span className="text-xs font-bold tracking-wide text-zinc-950 uppercase dark:text-zinc-50">
+            {sectionLabel}
+          </span>
+        </div>
       )}
+      <div className="flex flex-col gap-3 rounded-lg border border-zinc-200 p-4 dark:border-zinc-800">
+        <h2 className="text-sm font-medium text-zinc-700 dark:text-zinc-300">내 예매 — {eventTitle}</h2>
 
-      {state.phase === "queued" && (
-        <p className="text-sm text-zinc-600 dark:text-zinc-400">
-          대기 중입니다 — 현재 순번 <span className="font-semibold">{state.rank}</span>
-          {typeof state.etaSeconds === "number" && (
-            <> (예상 대기 약 {formatEta(state.etaSeconds)})</>
-          )}
-        </p>
-      )}
+        {state.phase === "idle" && (
+          <p className="text-sm text-zinc-500">대기열 입장 중...</p>
+        )}
+
+        {state.phase === "queued" && (
+          <p className="text-sm text-zinc-600 dark:text-zinc-400">
+            대기 중입니다 — 현재 순번{" "}
+            <span className="font-mono text-2xl font-bold tabular-nums text-zinc-950 dark:text-zinc-50">
+              {state.rank}
+            </span>
+            {typeof state.etaSeconds === "number" && (
+              <> (예상 대기 약 {formatEta(state.etaSeconds)})</>
+            )}
+          </p>
+        )}
 
       {state.phase === "admitted" && (
         <form onSubmit={handleSubmit} className="flex items-end gap-3">
@@ -309,14 +375,27 @@ export function BookingForm({ eventId, eventTitle }: BookingFormProps) {
       {state.phase === "error" && (
         <div className="flex flex-col gap-2">
           <p className="text-sm text-[#d03b3b]">{state.message}</p>
-          <button
-            onClick={handleJoinQueue}
-            className="self-start rounded-full border border-zinc-300 px-4 py-1.5 text-sm text-zinc-700 dark:border-zinc-700 dark:text-zinc-300"
-          >
-            다시 시도
-          </button>
+          {needsReauth(state.message) ? (
+            // 게이트 토큰/로그인 세션 만료 — 같은 예매 액션을 다시 시도해봐야
+            // 똑같이 실패한다. 루트로 보내면 page.tsx의 checkStatus()가 같은
+            // 메시지 판별로 게이트 폼(또는 로그인 버튼)을 다시 보여준다.
+            <button
+              onClick={() => router.push("/")}
+              className="self-start rounded-full border border-zinc-300 px-4 py-1.5 text-sm text-zinc-700 dark:border-zinc-700 dark:text-zinc-300"
+            >
+              처음부터 다시 시작하기
+            </button>
+          ) : (
+            <button
+              onClick={handleJoinQueue}
+              className="self-start rounded-full border border-zinc-300 px-4 py-1.5 text-sm text-zinc-700 dark:border-zinc-700 dark:text-zinc-300"
+            >
+              다시 시도
+            </button>
+          )}
         </div>
       )}
+      </div>
     </div>
   );
 }

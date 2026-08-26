@@ -3,8 +3,11 @@ import { render, screen } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { FakeEventSource } from "../../../test/fake-event-source";
 
+// useRouter — BookingForm이 게이트/로그인 만료 시 router.push("/")로 돌려보내는
+// 버튼을 렌더하므로 필요(2026-08-27).
 vi.mock("next/navigation", () => ({
   useParams: () => ({ id: "1" }),
+  useRouter: () => ({ push: vi.fn() }),
 }));
 
 import EventDetailPage from "./page";

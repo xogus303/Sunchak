@@ -71,7 +71,12 @@ export default function EventDetailPage() {
       {event !== null && event !== "not-found" && event.status === "ON_SALE" && (
         <div className="flex w-full max-w-5xl flex-col items-center gap-6 lg:flex-row lg:items-start lg:justify-center">
           <div className="flex w-full max-w-2xl flex-col items-center gap-6">
-            <BookingForm eventId={event.id} eventTitle={event.title} />
+            <BookingForm
+              eventId={event.id}
+              eventTitle={event.title}
+              joinQueueUrl={`/events/${event.id}/queue`}
+              queueStreamUrl={`/events/${event.id}/queue/stream`}
+            />
             <TicketList tickets={stats?.tickets ?? []} />
           </div>
           <DemoDashboard stats={stats} streamError={streamError} />
