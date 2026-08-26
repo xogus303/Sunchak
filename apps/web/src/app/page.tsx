@@ -45,9 +45,15 @@ export default function Home() {
     checkStatus().then(setStatus);
   }, []);
 
+  // 마운트 시엔 refreshStatus() 대신 checkStatus().then(setStatus)를 직접
+  // 호출한다 — 초기 status가 이미 "checking"이라 refreshStatus()의
+  // setStatus("checking") 동기 호출은 마운트 시점엔 의미 없는 재실행이고,
+  // 이 형태여야 react-hooks/set-state-in-effect(effect 안에서 setState를
+  // 동기 호출하지 말라)에도 걸리지 않는다 — setStatus가 .then 콜백
+  // 안에서만 불려 "외부 결과를 구독해 반영"하는 정상 패턴이 된다.
   useEffect(() => {
-    refreshStatus();
-  }, [refreshStatus]);
+    checkStatus().then(setStatus);
+  }, []);
 
   useEffect(() => {
     if (status === "dashboard") router.replace("/events");

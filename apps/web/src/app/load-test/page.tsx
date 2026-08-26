@@ -77,12 +77,12 @@ export default function LoadTestPage() {
 
   // stats(1초 주기 SSE)의 admissionQueueCount가 곧 "지금 참여하면 내 앞에
   // 몇 명이 서 있을지"와 같다 — 이 값이 임계치를 넘는 순간 본인을 참여시킨다.
-  useEffect(() => {
-    if (!resetDone || ready) return;
-    if ((stats?.admissionQueueCount ?? 0) >= QUEUE_BUILDUP_THRESHOLD) {
-      setReady(true);
-    }
-  }, [resetDone, ready, stats?.admissionQueueCount]);
+  // effect가 아니라 렌더 중 직접 setState하는 React 공식 패턴(리렌더 중
+  // 상태 조정) — !ready 가드가 한 번 참여시킨 뒤엔 재실행을 막아 무한
+  // 렌더 루프 없이 한 방향 래치로 동작한다.
+  if (resetDone && !ready && (stats?.admissionQueueCount ?? 0) >= QUEUE_BUILDUP_THRESHOLD) {
+    setReady(true);
+  }
 
   // 안전장치 — 페이스가 느린 환경 등으로 임계치에 영영 못 닿아도 화면이
   // 무한정 멈춰있지 않게 한다.
