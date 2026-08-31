@@ -116,6 +116,33 @@ describe('PaymentProcessor (통합 — 모의 결제 판정, ADR 0018)', () => {
     await expect(readStock()).resolves.toBe(3); // 관문 단계에서 이미 확정된 차감 — 성공 시 안 건드림
   });
 
+  // 2026-09-01 발견·수정 — 결제 큐가 밀려 job이 늦게 처리되면(concurrency
+  // 상향 + admission 백프레셔로 드물어졌지만 완전히 없어지진 않음) sweep이
+  // 먼저 HELD를 EXPIRED로 회수해버릴 수 있다. 이때 성공 판정이 났다고 그냥
+  // PAID로 남기면 "Payment는 PAID인데 Reservation은 EXPIRED"인 정합성
+  // 불일치가 생긴다.
+  it('성공 판정인데 이미 HELD가 아니면(예: sweep이 먼저 회수) PAID로 남기지 않고 FAILED로 처리한다', async () => {
+    randomSpy = jest.spyOn(Math, 'random').mockReturnValue(0.1); // < 0.8 → 성공 판정
+    await seedStock(5); // sweep이 이미 반환을 끝낸 상태를 흉내(재고 5 그대로)
+    const { reservation, payment } = await createHeldWithPayment(2);
+    // 결제 큐 처리 사이에 sweep이 먼저 만료 회수를 했다고 가정.
+    await prisma.reservation.update({
+      where: { id: reservation.id },
+      data: { status: ReservationStatus.EXPIRED },
+    });
+
+    await processor.process({ data: { paymentId: payment.id, reservationId: reservation.id } } as Job);
+
+    const updatedPayment = await prisma.payment.findUniqueOrThrow({ where: { id: payment.id } });
+    expect(updatedPayment.status).toBe(PaymentStatus.FAILED); // PAID로 안 남음
+    expect(confirmQueueMock.add).not.toHaveBeenCalled();
+    const updatedReservation = await prisma.reservation.findUniqueOrThrow({
+      where: { id: reservation.id },
+    });
+    expect(updatedReservation.status).toBe(ReservationStatus.EXPIRED); // sweep 결과 그대로
+    await expect(readStock()).resolves.toBe(5); // sweep이 이미 반환함 — 여기서 또 안 건드림
+  });
+
   it('실패 판정이면 Payment를 FAILED, Reservation을 CANCELLED로 바꾸고 재고를 즉시 반환한다', async () => {
     randomSpy = jest.spyOn(Math, 'random').mockReturnValue(0.9); // >= 0.8 → 실패
     await seedStock(3);

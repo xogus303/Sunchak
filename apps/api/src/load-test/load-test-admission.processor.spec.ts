@@ -3,11 +3,14 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { BullModule, getQueueToken } from '@nestjs/bullmq';
 import { Job, Queue } from 'bullmq';
 import { firstValueFrom } from 'rxjs';
+import { randomUUID } from 'node:crypto';
+import { ReservationStatus } from '@prisma/client';
 import { LoadTestAdmissionProcessor } from './load-test-admission.processor';
 import { LOAD_TEST_ADMISSION_QUEUE } from './load-test-admission.constants';
 import { QueueService } from '../queue/queue.service';
 import { QueueEventsService } from '../queue/queue-events.service';
 import { RedisService } from '../redis/redis.service';
+import { PrismaService } from '../prisma/prisma.service';
 import { ACTIVE_QUEUES_KEY, LOAD_TEST_ACTIVE_QUEUES_KEY } from '../queue/queue.constants';
 
 // 캐주얼 admission.processor.spec.ts와 같은 이유(실제 Redis Sorted Set/TTL이 있어야
@@ -28,11 +31,14 @@ describe('LoadTestAdmissionProcessor (통합 — 대용량 입장 처리, ADR 00
   const eventId = 9101;
   const MIN_BATCH = 50;
   const MAX_BATCH = 100;
+  // 백프레셔 테스트용 — 처리량 10건/초 × 허가창 5초(아래 WINDOW_MS) = 50명.
+  const MAX_IN_FLIGHT = 50;
 
   beforeAll(async () => {
     process.env.LOAD_TEST_ADMISSION_MEAN_FRACTION = '0.2';
     process.env.LOAD_TEST_ADMISSION_MIN_BATCH = String(MIN_BATCH);
     process.env.LOAD_TEST_ADMISSION_MAX_BATCH = String(MAX_BATCH);
+    process.env.LOAD_TEST_PAYMENT_THROUGHPUT_PER_SEC = '10';
     // onModuleInit이 등록하는 반복(repeat) job이 테스트 도중 배경에서 저절로
     // 실행되면 process()를 수동으로 부른 결과와 겹쳐(=경합) 허가 인원이 예상
     // 범위를 벗어난다(실측: 500명 투입 테스트가 251명 허가로 실패 — 수동 호출
@@ -58,7 +64,13 @@ describe('LoadTestAdmissionProcessor (통합 — 대용량 입장 처리, ADR 00
         }),
         BullModule.registerQueue({ name: LOAD_TEST_ADMISSION_QUEUE }),
       ],
-      providers: [LoadTestAdmissionProcessor, QueueService, QueueEventsService, RedisService],
+      providers: [
+        LoadTestAdmissionProcessor,
+        QueueService,
+        QueueEventsService,
+        RedisService,
+        PrismaService,
+      ],
     }).compile();
     await moduleRef.init();
 
@@ -88,6 +100,7 @@ describe('LoadTestAdmissionProcessor (통합 — 대용량 입장 처리, ADR 00
     delete process.env.LOAD_TEST_ADMISSION_MAX_BATCH;
     delete process.env.LOAD_TEST_ADMISSION_INTERVAL_MS;
     delete process.env.LOAD_TEST_ADMISSION_WINDOW_MS;
+    delete process.env.LOAD_TEST_PAYMENT_THROUGHPUT_PER_SEC;
     // ⚠️ admission.processor.spec.ts와 같은 이유로 obliterate()를 안 쓴다.
     await moduleRef.close();
   });
@@ -191,5 +204,78 @@ describe('LoadTestAdmissionProcessor (통합 — 대용량 입장 처리, ADR 00
     await expect(
       redis.sismember(ACTIVE_QUEUES_KEY, String(eventId)),
     ).resolves.toBe(0);
+  });
+
+  // 2026-09-01, ADR 0023 — 대기열 크기만 보던 배치 계산에 "지금 이미 결제
+  // 처리 중인(HELD) 인원이 처리량 상한에 얼마나 여유가 있는지"를 더한다.
+  // Reservation은 실제 FK(Event/User)가 있어야 해서, 이 describe만 별도로
+  // 진짜 Event/User를 만들어 쓴다(위 eventId=9101은 Redis 전용 가짜 id라 못 씀).
+  describe('백프레셔(처리량 상한을 넘으면 새로 허가하지 않는다)', () => {
+    let prisma: PrismaService;
+    let bpEventId: number;
+    let seedUserId: number;
+
+    beforeAll(async () => {
+      prisma = moduleRef.get(PrismaService);
+      const user = await prisma.user.create({
+        data: { email: `admission-backpressure-${randomUUID()}@test.local`, password: 'x' },
+      });
+      seedUserId = user.id;
+      const event = await prisma.event.create({
+        data: { title: '백프레셔 테스트', price: 1000, openAt: new Date() },
+      });
+      bpEventId = event.id;
+    });
+
+    afterEach(async () => {
+      await prisma.reservation.deleteMany({ where: { eventId: bpEventId } });
+      await redis.del(`queue:event:${bpEventId}`);
+      await redis.srem(LOAD_TEST_ACTIVE_QUEUES_KEY, String(bpEventId));
+      const keys = Array.from({ length: 500 }, (_, i) => `admitted:event:${bpEventId}:${i + 1}`);
+      await redis.del(...keys);
+    });
+
+    afterAll(async () => {
+      await prisma.event.delete({ where: { id: bpEventId } });
+      await prisma.user.delete({ where: { id: seedUserId } });
+    });
+
+    async function seedHeld(count: number) {
+      for (let i = 0; i < count; i++) {
+        await prisma.reservation.create({
+          data: {
+            userId: seedUserId,
+            eventId: bpEventId,
+            quantity: 1,
+            idempotencyKey: randomUUID(),
+            status: ReservationStatus.HELD,
+          },
+        });
+      }
+    }
+
+    it('이미 HELD가 처리량 상한(10건/초 × 5초 = 50명)만큼 있으면, 대기열이 많아도 아무도 새로 허가하지 않는다', async () => {
+      await seedHeld(MAX_IN_FLIGHT);
+      for (let userId = 1; userId <= 500; userId++) {
+        await queueService.joinLoadTest(bpEventId, userId);
+      }
+
+      await processor.process({} as Job);
+
+      await expect(queueService.size(bpEventId)).resolves.toBe(500);
+    });
+
+    it('여유분만큼만 허가하고 나머지는 대기열(TTL 없음)에 그대로 남긴다', async () => {
+      const alreadyHeld = MAX_IN_FLIGHT - 20; // 여유 20명
+      await seedHeld(alreadyHeld);
+      for (let userId = 1; userId <= 500; userId++) {
+        await queueService.joinLoadTest(bpEventId, userId);
+      }
+
+      await processor.process({} as Job);
+
+      const remaining = await queueService.size(bpEventId);
+      expect(500 - remaining).toBe(20);
+    });
   });
 });

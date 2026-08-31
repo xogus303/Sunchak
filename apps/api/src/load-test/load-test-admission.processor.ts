@@ -2,6 +2,8 @@ import { InjectQueue, Processor, WorkerHost } from '@nestjs/bullmq';
 import { OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Job, Queue } from 'bullmq';
+import { ReservationStatus } from '@prisma/client';
+import { PrismaService } from '../prisma/prisma.service';
 import { QueueService } from '../queue/queue.service';
 import { QueueEventsService } from '../queue/queue-events.service';
 import { poissonLikeBatchSize } from '../queue/poisson-batch';
@@ -16,6 +18,16 @@ import { LOAD_TEST_ADMISSION_QUEUE } from './load-test-admission.constants';
  *
  * QueueService.activeLoadTestEventIds()로 캐주얼 이벤트와 완전히 분리된
  * 목록만 보므로, 같은 이벤트를 두 워커가 동시에 ZPOPMIN하는 경합이 없다.
+ *
+ * 백프레셔(2026-09-01, ADR 0023) — 이 계산은 원래 "대기열이 얼마나 남았는가"만
+ * 보고 배치 크기를 정했는데, 그러면 뒷단(결제/확정 큐)이 실제로 얼마나 처리
+ * 가능한지와 무관하게 사람을 계속 밀어 넣게 된다. 대용량 테스트로 5,000명을
+ * 몰아넣어보니 결제 큐가 밀려 job 하나가 처리되기까지 분 단위가 걸렸고, 그
+ * 사이 HELD 30초 TTL이 먼저 지나 "결제는 성공인데 예매는 EXPIRED"인 데이터
+ * 불일치까지 발생했다(DEVLOG 2026-09-01 참고). Little's Law(L = λ·W)를 적용해
+ * "지금 이미 결제 처리 중인(HELD) 인원 수"가 "처리량 × 허가창 시간"을 넘지
+ * 않을 만큼만 새로 들여보낸다 — 뒷단이 밀리면 admission이 스스로 느려지고,
+ * 대기열(TTL 없음)에서 기다리는 사람만 늘어날 뿐 아무도 조용히 사라지지 않는다.
  */
 @Processor(LOAD_TEST_ADMISSION_QUEUE)
 export class LoadTestAdmissionProcessor extends WorkerHost implements OnModuleInit {
@@ -23,6 +35,7 @@ export class LoadTestAdmissionProcessor extends WorkerHost implements OnModuleIn
     private readonly queueService: QueueService,
     private readonly events: QueueEventsService,
     private readonly config: ConfigService,
+    private readonly prisma: PrismaService,
     @InjectQueue(LOAD_TEST_ADMISSION_QUEUE)
     private readonly admissionQueue: Queue,
   ) {
@@ -57,6 +70,25 @@ export class LoadTestAdmissionProcessor extends WorkerHost implements OnModuleIn
     );
   }
 
+  // 결제→확정 파이프라인이 실제로 초당 처리 가능한 건수(실측값, 2026-09-01) —
+  // 5,000명 투입으로 결제 큐를 포화시킨 뒤 Payment.updatedAt 분포로 측정한
+  // 정상 상태 처리량은 초당 약 70건이었다. 실제 서비스에서는 이 값이 가상
+  // 유저 생성 트래픽과도 경합하므로 여유를 둬 60으로 잡는다 — 인프라(커넥션
+  // 풀·워커 concurrency)를 바꾸면 이 값도 다시 재야 한다.
+  private paymentThroughputPerSec(): number {
+    return Number(
+      this.config.get<string>('LOAD_TEST_PAYMENT_THROUGHPUT_PER_SEC') ?? 60,
+    );
+  }
+
+  // Little's Law(L = λ·W) — 허가창(W) 안에 결제까지 끝나려면, 동시에 "이미
+  // 허가돼 결제 처리 중인" 인원(L)이 처리량(λ)×허가창 시간을 넘으면 안 된다.
+  private maxInFlight(): number {
+    return Math.floor(
+      this.paymentThroughputPerSec() * (this.admissionWindowMs() / 1000),
+    );
+  }
+
   async onModuleInit() {
     await this.admissionQueue.add(
       'admit',
@@ -70,12 +102,26 @@ export class LoadTestAdmissionProcessor extends WorkerHost implements OnModuleIn
 
     for (const eventId of eventIds) {
       const waiting = await this.queueService.size(eventId);
-      const batchSize = poissonLikeBatchSize(
+      const desiredBatchSize = poissonLikeBatchSize(
         waiting,
         this.meanFraction(),
         this.minBatch(),
         this.maxBatch(),
       );
+
+      // 백프레셔 — 지금 이미 허가돼 결제 처리 중인(HELD) 인원이 뒷단
+      // 처리량으로 감당 가능한 상한에 얼마나 여유가 있는지 본다. 여유가
+      // 없으면(뒷단이 밀린 상태) 이번 틱엔 아무도 새로 들이지 않고,
+      // 대기열(TTL 없음)에서 계속 기다리게 한다. 참고: 허가된 직후 예매
+      // 시도까지 약간의 지연(랜덤 딜레이)이 있어 HELD 집계가 한두 틱 정도
+      // 늦게 반영될 수 있다 — Little's Law는 평균적 관계라 이 정도 오차는
+      // 감안하고 쓰는 근사다(엄밀한 순간값 보장이 아님).
+      const inFlight = await this.prisma.reservation.count({
+        where: { eventId, status: ReservationStatus.HELD },
+      });
+      const availableSlots = Math.max(0, this.maxInFlight() - inFlight);
+      const batchSize = Math.min(desiredBatchSize, availableSlots);
+
       if (batchSize > 0) {
         const userIds = await this.queueService.popNext(eventId, batchSize);
         // admission.processor.ts(캐주얼)와 같은 이유로 Promise.all — 대용량은

@@ -57,3 +57,8 @@
 | [0016](./0016-public-demo-mode.md) | 공개 데모 모드: 진입 게이트 + 데모 장치 + 데이터 리셋 | Accepted |
 | [0017](./0017-admission-queue.md) | 선착순 입장 대기열: Redis Sorted Set 기반 admission 제어 | Accepted |
 | [0018](./0018-mock-payment.md) | 모의 결제: 확정 트리거를 HELD 생성에서 결제 성공으로 이동 | Accepted |
+| [0019](./0019-deployment-infra.md) | 배포 인프라: VM 직접 운영 + 무료 매직 도메인 | Accepted |
+| [0020](./0020-observability.md) | 관측: Prometheus+Grafana 자체 호스팅 + 공개 서브도메인 | Accepted |
+| [0021](./0021-neon-idle-cost.md) | sweep·reconcile의 Neon 상시 접근 제거 — 활동 플래그 + 보험 주기 | Accepted |
+| [0022](./0022-full-cd-automation.md) | CD 완전 자동화 — CI 통과 시 자동 빌드 + VM SSH 자동 배포 | Accepted |
+| [0023](./0023-load-test-admission-backpressure.md) | 대용량 테스트 입장 허가에 백프레셔 도입 — 처리량을 넘는 인원은 들이지 않는다 | Accepted |
