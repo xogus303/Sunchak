@@ -196,6 +196,30 @@ describe('LoadTestService (통합 — 대용량 트래픽 테스트, ADR 0016 �
     });
   });
 
+  // 2026-08-31 실서버 발견 — DB 커넥션 풀 타임아웃(P2024) 등 "결제 실패"도
+  // "포기"도 아닌 에러가 나면, injectVirtualUser/simulateBookingAttempt의
+  // catch가 로그만 남기고 어떤 카운터도 안 올려서 화면에 설명 안 되는 유령
+  // 인원이 생겼다. 이제는 systemErrorCount로 집계된다.
+  describe('시스템 오류 카운팅', () => {
+    it('가상 유저 생성이 예기치 않은 이유로 실패하면 systemErrorCount에 반영된다', async () => {
+      const result = await service.reset(10, userId);
+      const createSpy = jest
+        .spyOn(prisma.user, 'create')
+        .mockRejectedValueOnce(new Error('커넥션 풀 타임아웃'));
+
+      await service.simulateLoad(1, userId);
+      await new Promise((res) => setTimeout(res, 100)); // fire-and-forget 투입 여유
+
+      const msg = await firstValueFrom(await service.streamStats(userId));
+      expect(msg.data).toMatchObject({
+        systemErrorCount: 1,
+        totalQty: result.inventory.totalQty, // 다른 필드엔 영향 없음
+      });
+
+      createSpy.mockRestore();
+    });
+  });
+
   describe('stats 대시보드', () => {
     it('대용량 테스트 이벤트가 없으면 새로 만들어 빈 스냅샷을 흘려보낸다', async () => {
       const msg = await firstValueFrom(await service.streamStats(userId));
@@ -302,6 +326,7 @@ describe('LoadTestService (통합 — 대용량 트래픽 테스트, ADR 0016 �
         failedCount: 1,
         soldOutCount: 5,
         abandonedCount: 2,
+        systemErrorCount: 0,
         admissionQueueCount: 2,
       });
 

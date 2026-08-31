@@ -42,6 +42,13 @@ export interface LoadTestStats {
   failedCount: number;
   soldOutCount: number;
   abandonedCount: number;
+  // DB 커넥션 풀 타임아웃 등 "결제 실패"도 "포기"도 아닌 시스템 레벨 오류.
+  // 2026-08-31 실서버에서 대량 동시 요청 중 발견 — injectVirtualUser/
+  // simulateBookingAttempt의 catch가 로그만 남기고 어떤 카운터도 안 올려서,
+  // "투입 인원 = paid+failed+soldOut+abandoned 합" 불변식이 깨지고 화면에
+  // 설명 안 되는 유령 인원이 생겼다. 원인(커넥션 풀 부족) 자체는 별도로
+  // 고쳤지만, 남는 산발적 실패까지 정직하게 보여주기 위해 신설.
+  systemErrorCount: number;
   admissionQueueCount: number;
 }
 
@@ -231,11 +238,13 @@ export class LoadTestService {
         },
       });
       await this.queueService.joinLoadTest(eventId, user.id);
-      void this.simulateBookingAttempt(eventId, user.id).catch((e) => {
+      void this.simulateBookingAttempt(eventId, user.id).catch(async (e) => {
         this.logger.error('가상 유저 예매 시도 중 오류', e);
+        await this.redis.incr(`system-error:event:${eventId}`);
       });
     } catch (e) {
       this.logger.error('가상 유저 생성/대기열 진입 실패', e);
+      await this.redis.incr(`system-error:event:${eventId}`);
     }
   }
 
@@ -324,6 +333,7 @@ export class LoadTestService {
     await this.redis.set(`stock:event:${event.id}`, totalQty);
     await this.redis.set(`soldout:event:${event.id}`, 0);
     await this.redis.set(`abandoned:event:${event.id}`, 0);
+    await this.redis.set(`system-error:event:${event.id}`, 0);
     // 리셋 전에 대기열에 남아있던 사람도 함께 비운다(demo.service.ts와 같은 이유).
     await this.queueService.purge(event.id);
 
@@ -359,7 +369,7 @@ export class LoadTestService {
   }
 
   private async getStats(eventId: number): Promise<LoadTestStats> {
-    const [inventory, remaining, statusSums, waiting, active, paymentCounts, soldOut, abandoned, queued] =
+    const [inventory, remaining, statusSums, waiting, active, paymentCounts, soldOut, abandoned, systemError, queued] =
       await Promise.all([
         this.prisma.inventory.findUnique({
           where: { eventId },
@@ -380,6 +390,7 @@ export class LoadTestService {
         }),
         this.redis.get(`soldout:event:${eventId}`),
         this.redis.get(`abandoned:event:${eventId}`),
+        this.redis.get(`system-error:event:${eventId}`),
         this.queueService.size(eventId),
         // ⚠️ ReconcileProcessor(ADR 0021)가 "최근 예약 활동이 없으면" 하루
         // 한 번짜리 완화 모드로 빠진다 — 원래는 아무도 안 보는 유휴 시간의
@@ -415,6 +426,7 @@ export class LoadTestService {
       failedCount: countOf(PaymentStatus.FAILED),
       soldOutCount: Number(soldOut ?? 0),
       abandonedCount: Number(abandoned ?? 0),
+      systemErrorCount: Number(systemError ?? 0),
       admissionQueueCount: queued,
     };
   }

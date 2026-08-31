@@ -17,6 +17,7 @@ export interface LoadTestStats {
   failedCount: number;
   soldOutCount: number;
   abandonedCount: number;
+  systemErrorCount: number;
   admissionQueueCount: number;
 }
 

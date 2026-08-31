@@ -26,6 +26,7 @@ const sampleStats: LoadTestStats = {
   failedCount: 80,
   soldOutCount: 150,
   abandonedCount: 70,
+  systemErrorCount: 10,
   admissionQueueCount: 60,
 };
 
@@ -51,19 +52,27 @@ describe("LoadTestDashboard", () => {
     expect(screen.getByText("재고 잔량").nextSibling).toHaveTextContent("1000");
   });
 
-  it("최종 결과를 확정/결제실패/재고소진/포기 4분할 막대로 보여준다(개별 예매 목록 없이 집계값만)", () => {
+  it("최종 결과를 확정/결제실패/재고소진/포기/시스템오류 5분할 막대로 보여준다(개별 예매 목록 없이 집계값만)", () => {
     renderWithQuery(sampleStats);
 
-    // 300+80+150+70 = 600건
-    expect(screen.getByText("총 600건")).toBeInTheDocument();
+    // 300+80+150+70+10 = 610건
+    expect(screen.getByText("총 610건")).toBeInTheDocument();
     expect(screen.getByText("300건")).toBeInTheDocument();
     expect(screen.getByText("80건")).toBeInTheDocument();
     expect(screen.getByText("150건")).toBeInTheDocument();
     expect(screen.getByText("70건")).toBeInTheDocument();
+    expect(screen.getByText("10건")).toBeInTheDocument();
   });
 
-  it("아직 결과가 없으면(집계 4종 모두 0) 안내 문구를 보여준다", () => {
-    renderWithQuery({ ...sampleStats, paidCount: 0, failedCount: 0, soldOutCount: 0, abandonedCount: 0 });
+  it("아직 결과가 없으면(집계 5종 모두 0) 안내 문구를 보여준다", () => {
+    renderWithQuery({
+      ...sampleStats,
+      paidCount: 0,
+      failedCount: 0,
+      soldOutCount: 0,
+      abandonedCount: 0,
+      systemErrorCount: 0,
+    });
 
     expect(screen.getByText("아직 결과가 없습니다.")).toBeInTheDocument();
   });

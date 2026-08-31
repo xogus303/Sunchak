@@ -15,22 +15,26 @@ interface LoadTestDashboardProps {
 }
 
 // 캐주얼 데모의 OutcomeBar(ticket 목록 기반)와 달리, 대량 테스트는 개별 예매
-// 목록이 없어(use-load-test-stats.ts 주석 참고) 집계 숫자 4개(확정/결제실패/
-// 재고소진/포기)를 곧바로 분모로 쓴다 — 이 네 카운터의 합이 "투입된 가상 유저
-// 수"와 일치하는 것은 이미 백엔드에서 실측 검증된 불변식이다(2026-08-25 e2e,
-// STATUS.md 참고).
+// 목록이 없어(use-load-test-stats.ts 주석 참고) 집계 숫자를 곧바로 분모로
+// 쓴다 — 이 카운터들의 합이 "투입된 가상 유저 수"와 일치하는 것은 이미
+// 백엔드에서 실측 검증된 불변식이다(2026-08-25 e2e, STATUS.md 참고).
+// systemError(2026-08-31 추가) — DB 커넥션 풀 타임아웃 등 "결제 실패"도
+// "포기"도 아닌 시스템 레벨 오류. 예전엔 이런 실패가 어떤 카운터에도 안
+// 잡혀 이 불변식이 깨지고 화면에 설명 안 되는 유령 인원이 생겼다.
 function AttemptOutcomeBar({
   paid,
   failed,
   soldOut,
   abandoned,
+  systemError,
 }: {
   paid: number;
   failed: number;
   soldOut: number;
   abandoned: number;
+  systemError: number;
 }) {
-  const total = paid + failed + soldOut + abandoned;
+  const total = paid + failed + soldOut + abandoned + systemError;
   if (total === 0) {
     return <p className="text-sm text-zinc-500">아직 결과가 없습니다.</p>;
   }
@@ -39,6 +43,7 @@ function AttemptOutcomeBar({
     { n: failed, cls: "bg-[#d03b3b] dark:bg-[#f87171]" },
     { n: soldOut, cls: "bg-zinc-400 dark:bg-zinc-600" },
     { n: abandoned, cls: "bg-indigo-400 dark:bg-indigo-500" },
+    { n: systemError, cls: "bg-amber-400 dark:bg-amber-500" },
   ];
   return (
     <div className="flex flex-col gap-2">
@@ -78,6 +83,10 @@ function AttemptOutcomeBar({
         <span className="flex items-center gap-1.5">
           <span className="h-2 w-2 rounded-full bg-indigo-400 dark:bg-indigo-500" />
           포기 <b className="font-mono font-semibold text-zinc-950 dark:text-zinc-50">{abandoned}건</b>
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="h-2 w-2 rounded-full bg-amber-400 dark:bg-amber-500" />
+          시스템 오류 <b className="font-mono font-semibold text-zinc-950 dark:text-zinc-50">{systemError}건</b>
         </span>
       </div>
     </div>
@@ -145,6 +154,7 @@ export function LoadTestDashboard({ stats, streamError, sectionLabel }: LoadTest
           failed={stats?.failedCount ?? 0}
           soldOut={stats?.soldOutCount ?? 0}
           abandoned={stats?.abandonedCount ?? 0}
+          systemError={stats?.systemErrorCount ?? 0}
         />
         <DetailStrip
           items={[
