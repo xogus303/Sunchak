@@ -21,8 +21,12 @@ interface ConfirmJobData {
  *   → 같은 job이 재시도되거나 중복 투입돼도 안전(본래 멱등). 별도 방어 불필요.
  * - 재시도: process()가 throw하면 BullMQ가 job을 다시 큐에 넣는다(attempts/backoff).
  *   그래서 인프라 오류만 throw하고, count===0(할 일 없음)은 정상 종료한다.
+ *
+ * - concurrency(2026-08-31, payment.processor.ts와 같은 이유): 결제 성공마다
+ *   이 큐에도 job이 하나씩 더 쌓이므로, payment 큐만 올리면 병목이 여기로
+ *   그대로 넘어온다. 같은 값(20)으로 맞춘다.
  */
-@Processor(CONFIRM_QUEUE)
+@Processor(CONFIRM_QUEUE, { concurrency: 20 })
 export class ConfirmProcessor extends WorkerHost {
   private readonly logger = new Logger(ConfirmProcessor.name);
 

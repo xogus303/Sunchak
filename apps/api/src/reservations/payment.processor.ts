@@ -20,8 +20,16 @@ interface PayJobData {
  * - 실패: Payment→FAILED + Reservation을 CANCELLED로 돌리고 재고를 즉시 반환한다
  *   (사용자 확인 후 채택 — TTL 만료를 기다리지 않음). `updateMany(WHERE status=HELD)`
  *   가드로, 그 사이 sweep이 먼저 EXPIRED로 회수했다면(드문 경합) 여기서 중복 반환하지 않는다.
+ *
+ * - concurrency(2026-08-31 발견·수정) — BullMQ Worker의 기본값은 1이라, job을
+ *   한 번에 딱 하나씩만 처리한다. 대용량 테스트로 5,000명이 동시에 결제를
+ *   시도하면 DB 커넥션 풀(connection_limit=20)을 넉넉히 늘려도 워커 자체가
+ *   줄을 세워 처리해 job 하나가 처리되기까지 수 분씩 걸렸고(실측 3분 34초),
+ *   그 사이 HELD 30초 TTL이 먼저 지나 sweep에 회수돼버려 "Payment는 PAID인데
+ *   Reservation은 EXPIRED"인 데이터 불일치까지 낳았다. 커넥션 풀 크기와 맞춰
+ *   최대 20개 job을 동시에 처리하도록 올린다.
  */
-@Processor(PAYMENT_QUEUE)
+@Processor(PAYMENT_QUEUE, { concurrency: 20 })
 export class PaymentProcessor extends WorkerHost {
   constructor(
     private readonly prisma: PrismaService,
