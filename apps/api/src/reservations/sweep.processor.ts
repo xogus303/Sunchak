@@ -5,6 +5,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
 import {
   HELD_ACTIVITY_KEY,
+  PAYMENT_ATTEMPT_FALLBACK_MS,
   SWEEP_FALLBACK_INTERVAL_MS,
   SWEEP_FALLBACK_KEY,
   SWEEP_INTERVAL_MS,
@@ -30,6 +31,12 @@ interface ExpiredRow {
  * - DB 업데이트가 끝난 뒤에만 Redis를 보정한다(순서 중요). 크래시가 그 사이에 나도
  *   DB는 이미 EXPIRED라 뒤늦은 confirm job은 WHERE status=HELD에 안 걸려 무시된다
  *   (초과판매 방지). Redis만 못 돌려준 상태는 재구성 잡(reconcile)이 결국 고친다.
+ * - 이단계 만료 기준(2026-09-01, ADR 0023 후속): 결제 시도(Payment row)가 없는
+ *   HELD만 촘촘한 heldUntil(30초) TTL로 회수한다 — 이건 "결제 버튼도 안 누르고
+ *   이탈한" 진짜 abandonment. 이미 결제를 시도한 HELD는 이 TTL에서 제외하고,
+ *   결제 큐(payment/confirm)가 아무리 밀려도 언젠가는 스스로 PAID→CONFIRMED나
+ *   FAILED→CANCELLED로 확정짓게 맡긴다 — 대신 "결제 job 자체가 영영 안 끝나는"
+ *   진짜 장애만 잡는 훨씬 관대한 PAYMENT_ATTEMPT_FALLBACK_MS(5분)를 별도로 둔다.
  */
 @Processor(SWEEP_QUEUE)
 export class SweepProcessor extends WorkerHost implements OnModuleInit {
@@ -72,10 +79,17 @@ export class SweepProcessor extends WorkerHost implements OnModuleInit {
       }
     }
 
+    const paymentFallbackThreshold = new Date(Date.now() - PAYMENT_ATTEMPT_FALLBACK_MS);
     const expired = await this.prisma.$queryRaw<ExpiredRow[]>`
       UPDATE reservations
       SET status = 'EXPIRED'
-      WHERE status = 'HELD' AND "heldUntil" < now()
+      WHERE status = 'HELD' AND (
+        (
+          "heldUntil" < now()
+          AND NOT EXISTS (SELECT 1 FROM payments WHERE payments."reservationId" = reservations.id)
+        )
+        OR "createdAt" < ${paymentFallbackThreshold}
+      )
       RETURNING id, "eventId", quantity
     `;
 

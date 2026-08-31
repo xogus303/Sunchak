@@ -33,3 +33,13 @@ export const SWEEP_FALLBACK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 export const RECONCILE_FALLBACK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 export const SWEEP_FALLBACK_KEY = 'sweep:fallback-cooldown';
 export const RECONCILE_FALLBACK_KEY = 'reconcile:fallback-cooldown';
+
+// 2026-09-01(ADR 0023 후속) — sweep이 HELD_TTL_MS(30초)만 보고 무조건 회수하면,
+// 이미 결제 시도(Payment row 존재)까지 한 사람이 큐 백로그 때문에 뒤늦게
+// 처리되기 전에 먼저 만료돼버려 "Payment는 PAID인데 Reservation은 EXPIRED"인
+// 정합성 불일치가 생긴다(payment.processor.ts의 HELD 재확인 가드로도 완전히
+// 못 막음 — confirm 큐로 넘어가는 그 사이 틈에 sweep이 다시 끼어들 수 있음).
+// 결제 시도가 있는 예매는 이 촘촘한 TTL 대상에서 빼고, 대신 "결제 job 자체가
+// 영영 안 끝나는"(크래시 등 진짜 장애) 극단적 경우만 잡는 훨씬 관대한 별도
+// 안전망을 둔다 — 정상적인 큐 백로그(수십 초~분 단위)는 절대 여기 안 걸리게.
+export const PAYMENT_ATTEMPT_FALLBACK_MS = 5 * 60 * 1000; // 5분

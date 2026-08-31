@@ -3,13 +3,14 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { BullModule } from '@nestjs/bullmq';
 import { Job } from 'bullmq';
 import { randomUUID } from 'node:crypto';
-import { ReservationStatus } from '@prisma/client';
+import { PaymentStatus, ReservationStatus } from '@prisma/client';
 import { SweepProcessor } from './sweep.processor';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
 import {
   HELD_ACTIVITY_KEY,
   HELD_ACTIVITY_TTL_MS,
+  PAYMENT_ATTEMPT_FALLBACK_MS,
   SWEEP_FALLBACK_KEY,
   SWEEP_QUEUE,
 } from './reservations.constants';
@@ -153,6 +154,64 @@ describe('SweepProcessor (통합 — TTL 만료 스윕)', () => {
       where: { status: ReservationStatus.EXPIRED },
     });
     expect(count).toBe(2);
+  });
+
+  // 2026-09-01, ADR 0023 후속 — 이미 결제를 시도한(Payment row 존재) HELD는
+  // heldUntil이 지났어도 이 촘촘한 TTL로 회수하면 안 된다(결제 큐가 밀려
+  // 늦게 처리되는 정상적인 경우와, "결제 시도조차 없는 진짜 이탈"을 구분).
+  it('결제 시도(Payment row)가 있으면 heldUntil이 지나도 회수하지 않는다 — 결제 큐가 처리하게 맡긴다', async () => {
+    await seedStock(3);
+    const past = new Date(Date.now() - 1000);
+    const reservation = await createHeld(2, past);
+    await prisma.payment.create({
+      data: {
+        reservationId: reservation.id,
+        amount: 20000,
+        idempotencyKey: randomUUID(),
+        status: PaymentStatus.PENDING,
+      },
+    });
+
+    await processor.process({} as Job);
+
+    const untouched = await prisma.reservation.findUniqueOrThrow({
+      where: { id: reservation.id },
+    });
+    expect(untouched.status).toBe(ReservationStatus.HELD); // 건드리지 않음
+    await expect(readStock()).resolves.toBe(3); // 변화 없음
+  });
+
+  it('결제 시도가 있어도 PAYMENT_ATTEMPT_FALLBACK_MS만큼 오래되면 그때는 안전망으로 회수한다', async () => {
+    await seedStock(3);
+    const longAgo = new Date(Date.now() - PAYMENT_ATTEMPT_FALLBACK_MS - 1000);
+    const reservation = await prisma.reservation.create({
+      data: {
+        userId,
+        eventId,
+        quantity: 2,
+        idempotencyKey: randomUUID(),
+        status: ReservationStatus.HELD,
+        heldUntil: longAgo,
+        createdAt: longAgo, // 결제 job이 영영 처리 안 된 진짜 장애 상황을 흉내
+      },
+    });
+    await redis.set(HELD_ACTIVITY_KEY, '1', 'PX', HELD_ACTIVITY_TTL_MS);
+    await prisma.payment.create({
+      data: {
+        reservationId: reservation.id,
+        amount: 20000,
+        idempotencyKey: randomUUID(),
+        status: PaymentStatus.PENDING,
+      },
+    });
+
+    await processor.process({} as Job);
+
+    const updated = await prisma.reservation.findUniqueOrThrow({
+      where: { id: reservation.id },
+    });
+    expect(updated.status).toBe(ReservationStatus.EXPIRED); // 안전망으로 잡힘
+    await expect(readStock()).resolves.toBe(5); // 3 + 2 = 5
   });
 
   // ADR 0021 — 활동 플래그가 없을 때의 스킵/보험 로직 자체를 검증. 아래 두
