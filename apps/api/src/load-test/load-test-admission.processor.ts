@@ -93,14 +93,23 @@ export class LoadTestAdmissionProcessor extends WorkerHost implements OnModuleIn
     );
   }
 
-  // 결제→확정 파이프라인이 실제로 초당 처리 가능한 건수(실측값, 2026-09-01) —
-  // 5,000명 투입으로 결제 큐를 포화시킨 뒤 Payment.updatedAt 분포로 측정한
-  // 정상 상태 처리량은 초당 약 70건이었다. 실제 서비스에서는 이 값이 가상
-  // 유저 생성 트래픽과도 경합하므로 여유를 둬 60으로 잡는다 — 인프라(커넥션
-  // 풀·워커 concurrency)를 바꾸면 이 값도 다시 재야 한다.
+  // 결제→확정 파이프라인이 실제로 초당 처리 가능한 건수(실측값) — 인프라를
+  // 바꾸면 이 값도 다시 재야 한다(직전 재측정 이력 아래 참고).
+  //
+  // 2026-09-01 최초 실측: 70.8/초(concurrency=20, Prisma Client 경유) → 여유
+  // 두고 60 채택.
+  // 2026-09-09 재측정 — job당 DB 왕복을 줄이는 raw SQL 전환(payment.processor.ts
+  // /confirm.processor.ts/createHeld) 이후, admission의 페이스 개입 없이
+  // 순수하게 payment 큐만 3,000개 job으로 포화시켜 재측정(Payment.updatedAt
+  // 분포, 20.2초에 3,000건 완료) — **지속 초당 150~165건**(끝 구간 제외 평균
+  // 약 156). 여유를 두고 130 채택(약 2.2배 개선). 이 값이 낮으면 실제 처리
+  // 여력이 있는데도 admission이 옛 기준으로 과소 허가해, 처리 능력 향상의
+  // 효과가 체감으로 안 이어지는 문제가 있었다(burst 윈도우는 그대로 15초 —
+  // "몇 초 안에 처리되게 할 것인가"는 별개의 설계 선택이라 처리량과 무관하게
+  // 유지, 처리량이 오른 만큼 같은 15초 안에 더 많은 인원을 받아들이게 된다).
   private paymentThroughputPerSec(): number {
     return Number(
-      this.config.get<string>('LOAD_TEST_PAYMENT_THROUGHPUT_PER_SEC') ?? 60,
+      this.config.get<string>('LOAD_TEST_PAYMENT_THROUGHPUT_PER_SEC') ?? 130,
     );
   }
 

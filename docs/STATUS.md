@@ -5,7 +5,9 @@
 > - **세션 시작 시**: 이 파일을 가장 먼저 읽고 "다음 할 일"부터 이어간다.
 > - **세션 끝 / 커밋 전**: 이 파일을 **덮어써서** 최신 상태로 갱신한다. (시간순 이력·삽질은 `DEVLOG.md`, 결정 근거는 `decisions/`)
 
-**마지막 업데이트:** 2026-09-08 (같은 날, 이어서) (**재검증 결과 divergence 0 확인 + "burst 윈도우가 너무 작다" 신규 버그 실측 발견·수정(3초→15초, 아직 push 안 함)** — 사용자가 배포 사이트에서 재고 10,000·VU 5,000 재현 후 처리속도 향상은 체감했지만 ①본인 결제 완료까지 여전히 5~10초 지연 ②"입장 대기 중"이 쫙 줄었다 멈추고 반복되는 패턴을 관찰·보고, "직접 실시간으로 처리량을 관측할 수 없냐"고 요청. 에이전트가 새 부하 없이 기존 DB 기록만으로 SSH 분석: **divergence 정확히 0 확인**(`CONFIRMED=3,679`=`PAID=3,679`) — sweep 이단계화 완전 검증. burst-then-pause 패턴은 `reservation.createdAt` 히스토그램 분석으로 원인 확인 — 전체 시간의 30%가 admission 완전 정지 상태였고, 원인은 `paymentBurstWindowMs`(Little's Law의 W)가 "결제 job 처리 시간"(3초)만 반영하고 "사람이 결제 버튼 누르기까지의 랜덤 지연"(0.5~10초)을 안 봐서였음. 사용자와 Little's Law·maxInFlight의 의미를 식당 비유로 짚어가며 확인 문답(사용자가 정확히 이해·응용 질문에도 올바르게 답변) 후, 배포 사이트 실측(HELD 체류 시간 p90=14.9초)으로 3초→15초 재조정(ADR 0023 개정 이력). **테스트**: 기본값 변경만이라 회귀 없음, API 147개 그린·tsc 클린. 자세한 내용은 `docs/DEVLOG.md` 2026-09-08(두 번째 항목)·ADR 0023 개정 이력 참고. 이전(push+배포+SSH+env 반영) 요약은 아래 유지)
+**마지막 업데이트:** 2026-09-09 (**updatedAt 관측 버그 발견·수정 + 커넥션 풀 "idle in transaction" 근본 원인 규명·해결 + 처리량 재실측(60→130/초, 아직 push 안 함)** — Grafana 계정 안내(VM `grafana.env` 값 전달 + 로컬 `infra/grafana.env` 신규 생성) 처리 중 사용자가 "결제하기 눌러도 반응까지 수초 + 결제 처리 중이 약 10초"를 캐주얼 데모에서 보고, DB로 확인해보니 즉시 처리로 나와 "인프라엔 원인 없음"이라 1차 오판. 이후 사용자가 대용량 테스트(VU 5,000) 브라우저 DevTools 캡처(실제 지연 최대 40.84초)를 공유해 이 오판이 뒤집힘 — **원인은 2026-09-05 raw SQL 최적화가 `updatedAt` 갱신을 빠뜨린 관측 버그**였다(`$queryRaw`는 Prisma의 자동 `@updatedAt` 관리를 안 거침, sweep.processor.ts도 2026-08-01부터 같은 문제로 같이 수정). 버그를 고친 뒤 사용자 요청으로 pg_stat_activity를 직접 실시간 관측(스로어웨이 계정으로 VU 1,500→4,000 통제 재현)하며 **진짜 원인 발견 — 커넥션 풀(20개)이 93% 시간 동안 18~20으로 가득 찼고 최대 15개가 "idle in transaction"**(Prisma Client의 `create`/`updateMany` 같은 CRUD API가 단일 쓰기도 암묵적 `BEGIN...COMMIT`으로 감싸는 게 원인). `confirm.processor.ts`/`createHeld()`도 payment.processor.ts와 같은 raw SQL로 전환 — **재검증 결과 idle-in-transaction이 정확히 0으로 완전히 해소**(최대 15→0), 최대 동시 커넥션도 20 안 찍고 18에서 안정. 다만 체류 시간(중앙값 21.2초)은 안 줄어 admission이 옛 처리량 가정(60/초)으로 과소 허가 중임을 진단 — admission 개입 없는 격리 측정(HELD+Payment 3,000건 직접 생성 후 큐 일괄 투입, 20.2초에 처리 완료·내내 초당 150~165건)으로 처리량을 130/초로 재조정(burst 윈도우 15초는 유지). **테스트**: API 147개 전부 회귀 없이 그린(부수 발견 1건: raw SQL의 unique violation은 `e.code`가 P2002가 아니라 P2010, 실제 코드는 `e.meta.code`), tsc 클린. 사용자 요청으로 Grafana "Neon 예산 잔량" 패널 백로그 드롭, "캐주얼 데모 삭제→대용량 테스트를 메인으로" 전환 방향을 추후 작업으로 기록. **다음 세션: 처리량 재조정 push+배포 확인 → 최종 재검증 → 스로어웨이 테스트 데이터 정리.** 자세한 내용은 `docs/DEVLOG.md` 2026-09-09 항목·ADR 0023 개정 이력 참고. 이전(재검증 divergence 0 확인) 요약은 아래 유지)
+
+**이전 업데이트 (2026-09-08, 재검증 divergence 0 확인):** (**재검증 결과 divergence 0 확인 + "burst 윈도우가 너무 작다" 신규 버그 실측 발견·수정(3초→15초, 아직 push 안 함)** — 사용자가 배포 사이트에서 재고 10,000·VU 5,000 재현 후 처리속도 향상은 체감했지만 ①본인 결제 완료까지 여전히 5~10초 지연 ②"입장 대기 중"이 쫙 줄었다 멈추고 반복되는 패턴을 관찰·보고, "직접 실시간으로 처리량을 관측할 수 없냐"고 요청. 에이전트가 새 부하 없이 기존 DB 기록만으로 SSH 분석: **divergence 정확히 0 확인**(`CONFIRMED=3,679`=`PAID=3,679`) — sweep 이단계화 완전 검증. burst-then-pause 패턴은 `reservation.createdAt` 히스토그램 분석으로 원인 확인 — 전체 시간의 30%가 admission 완전 정지 상태였고, 원인은 `paymentBurstWindowMs`(Little's Law의 W)가 "결제 job 처리 시간"(3초)만 반영하고 "사람이 결제 버튼 누르기까지의 랜덤 지연"(0.5~10초)을 안 봐서였음. 사용자와 Little's Law·maxInFlight의 의미를 식당 비유로 짚어가며 확인 문답(사용자가 정확히 이해·응용 질문에도 올바르게 답변) 후, 배포 사이트 실측(HELD 체류 시간 p90=14.9초)으로 3초→15초 재조정(ADR 0023 개정 이력). **테스트**: 기본값 변경만이라 회귀 없음, API 147개 그린·tsc 클린. 자세한 내용은 `docs/DEVLOG.md` 2026-09-08(두 번째 항목)·ADR 0023 개정 이력 참고. 이전(push+배포+SSH+env 반영) 요약은 아래 유지)
 
 **이전 업데이트 (2026-09-08, push+배포+SSH 권한+env 반영):** (**push + CI/CD 배포 확인 + SSH 권한 설정 + 배포 VM 포기 확률 값 수동 반영 — 남은 건 3,000 VU 실서버 재검증뿐** — 커밋 `0e9bb2b`(concurrency/백프레셔/sweep 이단계 + 결제 우선순위 철회/처리량 개선/burst 윈도우 분리 전부 포함) push → CI/CD 자동 배포 성공 확인(`docker logs sunchak-api` 무에러). 사용자가 `.claude/settings.json`에 SSH 허용 규칙을 직접 추가해 지난 세션 내내 막혀있던 auto mode SSH 차단이 풀림 — 에이전트가 이제 VM에 직접 SSH 가능. 이 권한으로 VM의 `~/sunchak/api.env`를 확인해보니 `DEMO_SIM_ABANDON_PROBABILITY=0.2`가 명시돼 있어 코드 기본값(0.08)만으론 안 먹히고 있었음(예상대로) — 사용자 확인 후 백업+`sed`로 0.08 수정 + `sunchak-api` 컨테이너 재생성, `printenv`로 반영 확인. `LOAD_TEST_PAYMENT_BURST_WINDOW_MS` 등 나머지 신규 env는 VM에 별도 설정이 없어 코드 기본값이 자동 적용됨. **다음 세션(또는 준비되는 대로) 재고 5,000·VU 3,000 재현 → SSH로 divergence 직접 확인이 마지막 남은 작업.** 자세한 내용은 `docs/DEVLOG.md` 2026-09-08 항목 참고. 이전(2026-09-05, 우선순위 철회) 요약은 아래 유지)
 
@@ -269,8 +271,11 @@
   - **잡일 2건 같이 처리**: ① `/events` 판매중 카드에 `cursor-pointer` 추가(버튼 기본 커서가 `pointer`가 아니라 호버해도 클릭 가능해 보이지 않던 문제, 빌드 CSS 산출물로 확인). ② 백로그의 "`simulateLoad()` 쿨다운이 이벤트 확인보다 먼저 걸리는 문제"는 재확인 결과 이미 해소된 stale 이슈로 판명(2026-08-07 유저별 격리 작업에서 `findOrCreateOwnDemoEvent()`가 이벤트를 자동 생성하도록 바뀌어 애초에 404가 안 남) — 코드 변경 없이 정리. npm 보안 검토 자동화 백로그 항목은 사용자 요청으로 제거.
 
 ## 🔨 진행 중 / 막힌 것
-- ✅ ~~sweep 이단계화 divergence 재검증~~ — 2026-09-08 실서버 재현+SSH 직접 대조로 **0 확인 완료**(자세한 수치는 위 요약 참고).
-- **burst 윈도우 재조정(3초→15초, 2026-09-08) 실서버 재검증 대기 중** — 코드·단위테스트 완료(147개 그린), **아직 push 안 함**. admission이 더 이상 통째로 안 멈추는지, 실측 처리량이 이론상 2배(약 140/초)에 가까운지, 본인 결제 체감(5~10초 지연)이 줄었는지 아직 미확인. 막힌 건 아니고 다음 세션(또는 사용자가 준비되는 대로)에 진행. 아래 "다음 할 일" 14번 참고.
+- ✅ ~~sweep 이단계화 divergence 재검증~~ — 2026-09-08~09 실서버 재현+SSH 직접 대조로 **0 확인 완료**(자세한 수치는 위 요약 참고), VU 4,000 통제 재현에서도 재확인.
+- ✅ ~~updatedAt 관측 버그~~ — 2026-09-09 발견·수정(위 요약 참고). "결제 즉시 처리"라던 이전 진단이 이 버그 때문이었음이 드러남 — 실제로는 지연이 있었고, 원인은 커넥션 풀 문제(아래).
+- ✅ ~~커넥션 풀 "idle in transaction" 문제~~ — 2026-09-09 pg_stat_activity 직접 관측으로 원인(Prisma Client 암묵적 트랜잭션) 규명·raw SQL 전환으로 해결, 재검증으로 0건 확인.
+- **처리량 재조정(60→130/초, 2026-09-09) 실서버 재검증 대기 중** — 코드·단위테스트 완료(147개 그린), **아직 push 안 함**. 체류 시간이 실제로 줄었는지 아직 미확인. 막힌 건 아니고 다음 세션(또는 사용자가 준비되는 대로)에 진행. 아래 "다음 할 일" 20번 참고.
+- **스로어웨이 테스트 데이터 정리 필요** — 오늘 실측용으로 만든 계정 3개·이벤트 2개, 다음 세션에 정리(아래 "다음 할 일" 21번).
 - ✅ ~~배포 VM `api.env`의 `DEMO_SIM_ABANDON_PROBABILITY` 수동 갱신~~ — 2026-09-08 SSH로 0.2→0.08 수정 + `sunchak-api` 재시작, 컨테이너 내부 `printenv`로 반영 확인 완료.
 - ✅ ~~SSH 권한을 auto mode에서 못 씀~~ — 2026-09-08 사용자가 `.claude/settings.json`에 `Bash(ssh -i ~/Desktop/aws/sunchak-key.pem ubuntu@15.164.234.208 *)` 허용 규칙 추가, 이후 에이전트가 VM에 정상 SSH 가능 확인.
 - (그 외 막힌 것 없음.)
@@ -303,34 +308,15 @@
 11. ✅ ~~배포 VM `api.env`의 `DEMO_SIM_ABANDON_PROBABILITY` 0.2→0.08 수정 + `sunchak-api` 재시작~~(2026-09-08, SSH로 직접 확인·적용 — 원본은 타임스탬프 백업, 컨테이너 내부 `printenv`로 0.08 반영·무에러 기동 확인).
 12. ✅ ~~sweep 이단계화(74건 divergence) 실서버 재검증~~(2026-09-08, 사용자가 재고 10,000·VU 5,000 재현 → 에이전트가 SSH로 직접 DB 대조) — **divergence 정확히 0 확인**(`Reservation CONFIRMED=3,679`=`Payment PAID=3,679`, `CANCELLED=914`=`FAILED=914`). sweep 이단계화가 실전에서 완전히 검증됨.
 13. ✅ ~~"burst-then-pause"(입장 대기가 쫙 줄었다 멈추는 패턴) 신규 버그 발견·수정~~(2026-09-08) — 위 재검증 중 사용자가 관찰·질문, 에이전트가 기존 DB 기록으로 원인 진단(추가 부하 없이): `paymentBurstWindowMs`(W)가 "결제 job 처리 시간"(3초)만 반영하고 "사람이 결제 버튼 누르기까지의 랜덤 지연"(0.5~10초)을 안 봐서, 테스트 시간의 30%가 admission 완전 정지 상태였음. 배포 사이트 실측(HELD 체류 시간 p90=14.9초)으로 3초→15초 재조정(ADR 0023 개정 이력). **API 147개 그린, tsc 클린 → 커밋 [064fb35] push 완료(2026-09-08).**
-14. **최우선(진행 중)** — 13번 push는 끝남, **CI/CD 배포 확인은 진행 중**(백그라운드로 SSH 폴링 중) → 배포 확인되는 대로 재검증(admission이 더 이상 통째로 멈추지 않는지, 실측 처리량이 이론상 2배에 가까운지, 본인 결제 체감이 5~10초보다 줄었는지):
-   ```bash
-   ssh -i ~/Desktop/aws/sunchak-key.pem ubuntu@15.164.234.208 bash -s <<'EOF'
-   cat > /tmp/check-divergence.js <<'JS'
-   const { PrismaClient } = require('@prisma/client');
-   const p = new PrismaClient();
-   (async () => {
-     const rows = await p.$queryRawUnsafe(`
-       SELECT e.id AS event_id,
-         (SELECT count(*) FROM reservations r WHERE r."eventId" = e.id AND r.status = 'CONFIRMED') AS reservation_confirmed,
-         (SELECT count(*) FROM payments pay JOIN reservations r2 ON pay."reservationId" = r2.id WHERE r2."eventId" = e.id AND pay.status = 'PAID') AS payment_paid,
-         (SELECT count(*) FROM reservations r3 WHERE r3."eventId" = e.id) AS total_reservations
-       FROM events e
-       WHERE e."loadTestOwnerId" IS NOT NULL
-       ORDER BY e."createdAt" DESC
-       LIMIT 1
-     `);
-     console.log(JSON.stringify(rows, null, 2));
-     await p.$disconnect();
-   })();
-   JS
-   docker cp /tmp/check-divergence.js sunchak-api:/tmp/check-divergence.js
-   docker exec sunchak-api node /tmp/check-divergence.js
-   EOF
-   ```
-   결과를 `docs/DEVLOG.md` 2026-09-08 항목 끝에 추가 기록 + 이 STATUS.md 갱신.
+14. ✅ ~~13번 push+배포 확인~~(2026-09-08, `docker exec printenv`로 반영 확인) → ✅ ~~재검증~~(2026-09-08, 사용자가 재고 10,000·VU 5,000 재현) — **divergence는 0으로 재확인됐지만, "결제하기 눌러도 반응까지 수초 + 결제 처리 중이 약 10초"라는 새 지연을 브라우저 DevTools로 보고받음.** 조사가 15~19번으로 이어짐.
 15. ❌ ~~ADR 0016 백로그 — Grafana에 "Neon 예산 잔량" 패널 추가~~ — **드롭(2026-09-09, 사용자 결정)**. ADR 0016에도 반영.
-16. (선택, 백로그로 미뤄둠) VU/재고 상한(현재 1만) 상향 — 백프레셔 도입이 전제조건이었고 이제 갖춰졌으므로 검토 가능(ADR 0023 참고, 2026-09-01 사용자와 합의해 이번 범위에서는 보류).
+16. **추후 작업(사용자 결정, 2026-09-09, 아직 미착수)** — 캐주얼 데모 삭제, 대용량 트래픽 테스트를 메인 기능으로 전환. 관련 코드(`demo/` 모듈, `admission.processor.ts`, 프론트 `demo-dashboard.tsx` 등) 제거 + 도움말/문서 갱신 필요. 범위가 커서 별도 세션에서 계획부터 시작할 것.
+17. ✅ ~~updatedAt 관측 버그 발견·수정~~(2026-09-09) — 사용자의 브라우저 DevTools 캡처(실제 지연 최대 40.84초)가 "결제 즉시 처리"라던 이전 진단과 안 맞아 재조사, `payment.processor.ts`(2026-09-05 raw SQL 전환)와 `sweep.processor.ts`(2026-08-01 최초 구현부터, 기존 버그)의 raw SQL이 `updatedAt`을 안 갱신하고 있었음을 발견 — `$queryRaw`는 Prisma Client의 자동 `@updatedAt` 관리를 안 거침. 비즈니스 로직 영향은 없었지만(읽는 코드 없음) 관측 데이터를 신뢰할 수 없게 만들어 오판으로 이어졌었음. 커밋 `e5f32cf`.
+18. ✅ ~~커넥션 풀 근본 원인 규명·해결(confirm.processor.ts + createHeld() raw SQL 전환)~~(2026-09-09) — 사용자 요청으로 pg_stat_activity를 직접 실시간 관측(스로어웨이 계정으로 VU 1,500→4,000 통제 재현), 커넥션 풀(20개)이 93% 시간 동안 18~20으로 가득 차고 **최대 15개가 "idle in transaction"**(Prisma Client의 암묵적 BEGIN/COMMIT 래핑 때문)임을 확인 — `confirm.processor.ts`/`createHeld()`도 raw SQL로 전환. **재검증 결과 idle-in-transaction 완전히 0으로 해소**(최대 15→0), 최대 동시 커넥션도 20 안 찍고 18에서 안정. 부수 발견: raw SQL의 unique violation은 `e.code`가 `P2002`가 아니라 `P2010`이고 실제 코드는 `e.meta.code`에 담김 — 재전송 판정 로직 수정. 커밋 `baa5646`.
+19. ✅ ~~처리량(λ) 재실측 — 60→130/초~~(2026-09-09) — 위 재검증에서 divergence 0·idle-in-tx 0은 확인됐지만 체류 시간(중앙값 21.2초)이 안 줄어, admission이 옛 처리량 가정(60/초)으로 여전히 입장을 과소 허가 중임을 진단. admission 개입을 완전히 배제한 격리 측정(HELD 예매+Payment 3,000건 직접 생성 후 큐에 한 번에 투입, 20.2초 만에 처리 완료, 내내 초당 150~165건 유지)으로 **약 2.2배 개선** 확인 → `LOAD_TEST_PAYMENT_THROUGHPUT_PER_SEC` 130으로 상향(burst 윈도우 15초는 유지, 처리량이 오른 만큼 `maxInFlight`가 900→1,950으로 자연 반영). ADR 0023에 개정 이력 추가. **API 147개 그린·tsc 클린 — 아직 push 안 함.**
+20. **최우선(진행 중)** — 19번을 push → CI/CD 배포 확인 → 재고 5,000 이상 규모로 재현해 ①체류 시간이 실제로 줄었는지(목표: 중앙값이 수 초대로) ②본인 결제 체감이 개선됐는지 최종 재검증. 결과를 `docs/DEVLOG.md` 2026-09-09 항목 끝에 기록 + STATUS.md 갱신.
+21. **잡일** — 오늘 실측용으로 만든 스로어웨이 계정 3개(`loadtest-probe-*@sunchak-probe.local`, `throughput-probe-*@sunchak-probe.local`)와 테스트 이벤트(id 13, 14)를 배포 DB에서 정리. 실제 서비스 데이터와 안 섞이지만(격리된 별도 계정) 지저분하게 남겨두지 않는 게 좋음.
+22. (선택, 백로그로 미뤄둠) VU/재고 상한(현재 1만) 상향 — 백프레셔 도입이 전제조건이었고 이제 갖춰졌으므로 검토 가능(ADR 0023 참고, 2026-09-01 사용자와 합의해 이번 범위에서는 보류).
 17. **추후 작업(사용자 결정, 2026-09-09)** — 캐주얼 데모 삭제, 대용량 트래픽 테스트를 메인 기능으로 전환. 관련 코드(`demo/` 모듈, `admission.processor.ts`, `/demo` 라우트·프론트 `demo-dashboard.tsx` 등) 제거 + 도움말/문서 갱신 필요. 아직 착수 안 함 — 범위가 크므로 별도 세션에서 계획부터.
 
 ## 🚀 배포 VM 정보 (AWS EC2, 2026-08-19 발급)
