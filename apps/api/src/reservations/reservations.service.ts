@@ -213,6 +213,16 @@ export class ReservationsService {
   //   - 관문이 INSERT보다 먼저라, 재전송도 DECRBY를 한 번 더 깎는다.
   //   - HELD INSERT가 (userId, idempotencyKey) unique를 위반하면(P2002) = 재전송.
   //     → 깎은 재고를 INCRBY로 되돌리고(보상), 첫 요청의 예매를 그대로 성공 응답한다(409 아님).
+  //
+  // raw SQL INSERT(2026-09-09) — `prisma.reservation.create()`(Prisma Client)는
+  // 매 호출을 암묵적으로 BEGIN...COMMIT으로 감싼다(왕복 3번, Prisma의 기본
+  // 안전장치). 대용량 테스트로 실측해보니(pg_stat_activity 직접 관측) 이
+  // 예매 생성 경로가 확정 워커(confirm.processor.ts, 같은 이유로 raw SQL 전환)
+  // 와 함께 커넥션 풀(20개)을 "idle in transaction"(트랜잭션은 열려있는데
+  // 다음 단계를 기다리며 노는 상태)으로 가장 많이 잡아먹는 두 곳이었다 —
+  // `$queryRaw`는 이 암묵적 트랜잭션 래핑을 안 거쳐 왕복이 1번으로 준다.
+  // P2002(재전송) 판정은 raw 쿼리도 동일하게 PrismaClientKnownRequestError로
+  // 온다(Postgres 에러를 Prisma가 매핑하는 계층은 raw 쿼리든 아니든 같음).
   private async createHeld(
     eventId: number,
     userId: number,
@@ -234,16 +244,26 @@ export class ReservationsService {
     }
 
     try {
-      const reservation = await this.prisma.reservation.create({
-        data: {
-          userId,
-          eventId,
-          quantity,
-          idempotencyKey,
-          status: ReservationStatus.HELD,
-          heldUntil: new Date(Date.now() + this.HELD_TTL_MS),
-        },
-      });
+      const [reservation] = await this.prisma.$queryRaw<
+        {
+          id: number;
+          userId: number;
+          eventId: number;
+          quantity: number;
+          status: ReservationStatus;
+          idempotencyKey: string;
+          heldUntil: Date;
+          createdAt: Date;
+          updatedAt: Date;
+        }[]
+      >`
+        INSERT INTO reservations
+          ("userId", "eventId", quantity, status, "idempotencyKey", "heldUntil", "createdAt", "updatedAt")
+        VALUES
+          (${userId}, ${eventId}, ${quantity}, 'HELD', ${idempotencyKey},
+           ${new Date(Date.now() + this.HELD_TTL_MS)}, now(), now())
+        RETURNING *
+      `;
 
       // ADR 0021 — "최근 활동 있었음" 신호. sweep·reconcile이 유휴 시 Postgres
       // 접근을 건너뛸지 판단하는 근거로 쓴다(TTL 90초, 정확한 근거는 constants 주석 참고).
@@ -252,16 +272,22 @@ export class ReservationsService {
       return reservation;
     } catch (e) {
       // 재전송(같은 userId+idempotencyKey의 2번째 INSERT) → DB가 원자적으로 거부.
+      // ⚠️ raw SQL(`$queryRaw`) 에러는 Prisma Client API(`create()` 등)와 달리
+      // 항상 최상위 code가 'P2010'("Raw query failed")로 오고, 실제 DB 에러
+      // 코드(unique violation='23505')는 `e.meta.code`에 문자열로 담긴다
+      // (2026-09-09, raw SQL 전환하며 실제 테스트 실패로 발견 — 처음엔 `e.code`를
+      // 직접 비교했다가 안 잡혀서 실제 에러 형태를 보고 알았다).
       if (
         e instanceof Prisma.PrismaClientKnownRequestError &&
-        e.code === 'P2002'
+        e.code === 'P2010' &&
+        (e.meta as { code?: string } | undefined)?.code === '23505'
       ) {
         await this.redis.incrby(key, quantity); // 재전송이 깎은 재고 보상
         return this.prisma.reservation.findUniqueOrThrow({
           where: { userId_idempotencyKey: { userId, idempotencyKey } },
         });
       }
-      // ⚠️ P2002가 아닌 그 외 모든 에러(DB 연결 끊김·타임아웃·기타)는 INSERT
+      // ⚠️ 위 unique violation이 아닌 그 외 모든 에러(DB 연결 끊김·타임아웃·기타)는 INSERT
       // 자체가 실패했다는 뜻 — 티켓이 실제로 확보되지 않았는데도 방금 DECRBY로
       // 깎은 재고는 그대로 남아있었다(2026-08-27, 대량 동시 요청 중 재고 표시가
       // 음수로 고정되는 걸 실사용 중 발견해 원인 추적 — 이 분기만 보상이

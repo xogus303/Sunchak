@@ -25,6 +25,13 @@ interface ConfirmJobData {
  * - concurrency(2026-08-31, payment.processor.ts와 같은 이유): 결제 성공마다
  *   이 큐에도 job이 하나씩 더 쌓이므로, payment 큐만 올리면 병목이 여기로
  *   그대로 넘어온다. 같은 값(20)으로 맞춘다.
+ * - raw SQL(2026-09-09) — `updateMany()`(Prisma Client)는 매 호출을 암묵적
+ *   BEGIN...COMMIT으로 감싼다(Prisma의 기본 안전장치, 왕복 3번). 대용량
+ *   테스트로 pg_stat_activity를 직접 관측해보니 이 워커가 `reservations.
+ *   service.ts`의 예매 생성과 함께 커넥션 풀(20개)을 "idle in transaction"
+ *   상태로 가장 많이 묶어두는 두 곳이었다(20개 중 최대 15개가 이 상태로 관측됨).
+ *   `$queryRaw`는 이 래핑을 안 거쳐 왕복이 1번으로 준다(payment.processor.ts와
+ *   같은 패턴).
  */
 @Processor(CONFIRM_QUEUE, { concurrency: 20 })
 export class ConfirmProcessor extends WorkerHost {
@@ -40,12 +47,14 @@ export class ConfirmProcessor extends WorkerHost {
   async process(job: Job<ConfirmJobData>): Promise<void> {
     const { reservationId } = job.data;
 
-    const { count } = await this.prisma.reservation.updateMany({
-      where: { id: reservationId, status: ReservationStatus.HELD },
-      data: { status: ReservationStatus.CONFIRMED },
-    });
+    const rows = await this.prisma.$queryRaw<{ id: number }[]>`
+      UPDATE reservations
+      SET status = 'CONFIRMED', "updatedAt" = now()
+      WHERE id = ${reservationId} AND status = 'HELD'
+      RETURNING id
+    `;
 
-    if (count === 0) {
+    if (rows.length === 0) {
       // 이미 CONFIRMED(재시도·중복 job)거나 EXPIRED(TTL 회수됨) → 확정할 게 없음.
       this.logger.debug(`예매 ${reservationId}: HELD 아님 → 확정 건너뜀(멱등 no-op)`);
       return;

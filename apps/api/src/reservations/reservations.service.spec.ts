@@ -176,7 +176,7 @@ describe('ReservationsService (통합 — held 흐름)', () => {
       await seedStock(5);
       const dbError = new Error('DB 연결이 끊겼습니다');
       const createSpy = jest
-        .spyOn(prisma.reservation, 'create')
+        .spyOn(prisma, '$queryRaw')
         .mockRejectedValueOnce(dbError);
 
       await expect(
