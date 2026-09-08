@@ -810,3 +810,11 @@
 - **테스트**: `payments.service.spec.ts`/`payment.processor.spec.ts`의 우선순위 테스트 제거(원래 단언으로 복원). `load-test-admission.processor.spec.ts`에 "허가창을 늘려도 백프레셔 상한은 안 커진다" 1건 추가, 기존 백프레셔 테스트 2건은 새 env 키(`LOAD_TEST_PAYMENT_BURST_WINDOW_MS`)로 같은 상한값을 재현하도록 조정. **API 148→147 그린**(순감소 — 우선순위 2건 제거 + burst 윈도우 1건 추가). tsc 클린.
 - **SSH 권한**: 사용자가 이 작업과 별개로 SSH(auto mode 차단) 허용을 요청 — `update-config` 스킬 호출 자체도 분류기가 차단해, 에이전트가 settings.json을 대신 고쳐줄 수 없음을 확인·안내(사용자가 직접 설정해야 함). 이번 세션엔 미해결.
 - **다음**: 이번 변경(우선순위 철회 + 처리량 2배 개선 + burst 윈도우 분리) push → CI/CD 배포 확인 → 3,000 VU(또는 더 큰 규모) 재현으로 ①divergence 0 확인 ②실측 처리량이 실제로 2배 가까이 올랐는지 ③본인 결제 체감(우선순위 없이도 burst 제한만으로 충분히 빠른지) 셋 다 검증. 배포 VM `api.env`의 `DEMO_SIM_ABANDON_PROBABILITY` 수동 갱신은 여전히 남아있음.
+
+## 2026-09-08 · push + 배포 확인, SSH 권한 설정, 배포 VM 포기 확률 값 수동 반영
+
+- **push**: 위 두 항목(concurrency/백프레셔/sweep 이단계 + 우선순위 철회/처리량 개선/burst 윈도우 분리)을 커밋 `0e9bb2b`(`fix(load-test): 대용량 테스트 UX 개선 + 결제 처리 병목 근본 해결`) 하나로 묶어 push. CI/CD(ADR 0022) 자동 트리거.
+- **SSH 권한**: 지난 세션에 막혔던 걸 사용자가 `.claude/settings.json`에 `Bash(ssh -i ~/Desktop/aws/sunchak-key.pem ubuntu@15.164.234.208 *)` 허용 규칙을 직접 추가 — 이후 에이전트가 VM에 정상 SSH 가능함을 실측 확인(이전엔 `update-config` 스킬 호출조차 auto mode 분류기가 차단했었음).
+- **배포 확인**: SSH로 `docker ps` 확인 결과 `sunchak-api`/`sunchak-web`이 31초 전에 재기동돼 있어 CD가 이미 성공적으로 반영한 상태였음. `docker logs sunchak-api`로 전체 라우트 매핑·`Nest application successfully started`까지 에러 없이 뜬 것 확인.
+- **`DEMO_SIM_ABANDON_PROBABILITY` 수동 반영**: `~/sunchak/api.env`를 SSH로 직접 grep해 `DEMO_SIM_ABANDON_PROBABILITY=0.2`가 명시돼 있음을 확인(코드 기본값만 바꿔선 안 먹히는 상태였다는 예상이 맞았음). 사용자 확인 후 ①타임스탬프 백업(`api.env.bak.<timestamp>`) ②`sed`로 `0.2`→`0.08`로 수정 ③`docker compose up -d api`로 컨테이너 재생성 ④컨테이너 내부 `printenv DEMO_SIM_ABANDON_PROBABILITY`로 `0.08` 반영과 무에러 기동을 확인. `LOAD_TEST_PAYMENT_BURST_WINDOW_MS`/`LOAD_TEST_ADMISSION_WINDOW_MS`는 VM에 별도 설정이 없어 새 코드 기본값(3초/30초 그대로)이 자동 적용됨 — 추가 조치 불필요.
+- **다음**: 배포 사이트(`/load-test`)에서 재고 5,000·VU 3,000(또는 더 큰 규모) 재현 → ①divergence(Payment PAID vs Reservation CONFIRMED) 0 확인 ②실측 처리량이 2배 가까이 올랐는지 ③본인 결제가 우선순위 없이도 즉시 처리되는지(burst 윈도우 축소만으로 충분한지) 세 가지 검증. 이제 SSH가 풀렸으니 divergence 확인은 에이전트가 직접 위 SELECT 스크립트로 실행 가능.
