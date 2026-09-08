@@ -147,7 +147,7 @@ export class DemoService {
   // 실제 지연을 기다리지 않고 테스트에서 아주 작은 값으로 덮어쓸 수 있어야 함) —
   // 운영값 자체는 바뀔 일이 거의 없다.
   private abandonProbability(): number {
-    return Number(this.config.get<string>('DEMO_SIM_ABANDON_PROBABILITY') ?? 0.2);
+    return Number(this.config.get<string>('DEMO_SIM_ABANDON_PROBABILITY') ?? 0.08);
   }
   // 입장 허가창(QUEUE_ADMISSION_WINDOW_MS, 기본 8초)보다 살짝 넓게 잡아야 "대부분
   // 성공, 느린 일부만 놓침"이 된다 — 창보다 훨씬 넓으면(예전 1~35초) 대부분이

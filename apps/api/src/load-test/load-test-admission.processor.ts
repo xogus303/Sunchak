@@ -28,6 +28,13 @@ import { LOAD_TEST_ADMISSION_QUEUE } from './load-test-admission.constants';
  * "지금 이미 결제 처리 중인(HELD) 인원 수"가 "처리량 × 허가창 시간"을 넘지
  * 않을 만큼만 새로 들여보낸다 — 뒷단이 밀리면 admission이 스스로 느려지고,
  * 대기열(TTL 없음)에서 기다리는 사람만 늘어날 뿐 아무도 조용히 사라지지 않는다.
+ *
+ * 허가창(W)과 burst 윈도우 분리(2026-09-05) — maxInFlight의 W는 이제
+ * admissionWindowMs()(사람이 반응할 시간, 30초)가 아니라 별도의 훨씬 짧은
+ * paymentBurstWindowMs()(기본 3초)를 쓴다. 자세한 배경은 ADR 0018 철회
+ * 이력·아래 maxInFlight() 주석 참고 — 요약하면 "허가받은 사람이 반응할
+ * 시간"과 "결제 단계에 동시에 몰려도 되는 인원 수"는 서로 다른 개념이라
+ * 같은 숫자를 쓰면 안 됐다.
  */
 @Processor(LOAD_TEST_ADMISSION_QUEUE)
 export class LoadTestAdmissionProcessor extends WorkerHost implements OnModuleInit {
@@ -81,11 +88,28 @@ export class LoadTestAdmissionProcessor extends WorkerHost implements OnModuleIn
     );
   }
 
-  // Little's Law(L = λ·W) — 허가창(W) 안에 결제까지 끝나려면, 동시에 "이미
-  // 허가돼 결제 처리 중인" 인원(L)이 처리량(λ)×허가창 시간을 넘으면 안 된다.
+  // burst 윈도우 — "동시에 결제 처리 중일 수 있는 인원(L)"을 얼마나 빨리
+  // 비우고 싶은지를 나타내는 값. 2026-09-05 이전엔 이 계산이 admissionWindowMs()
+  // (사람이 반응할 시간, 기본 30초)를 그대로 재사용했는데, 그러면 최대
+  // 처리량×30초(=1,800명)까지 동시에 결제를 시도해도 되는 셈이라, job당 DB
+  // 왕복을 줄여 처리량을 올려도(payment.processor.ts 주석 참고) 여전히
+  // 순간적으로 큰 배치가 몰려 결제 큐가 체감상 느려질 수 있었다. "허가창"과
+  // "동시 결제 허용치"는 서로 다른 개념이다(하나는 사람의 반응 속도, 하나는
+  // 뒷단 처리 능력) — 사용자 지적으로 분리했다(ADR 0018 철회 이력 참고).
+  // 짧게 잡을수록 결제 단계가 항상 여유 있게 유지되고, 넘치는 인원은 (원래
+  // 의도대로) 입장 대기열 쪽에서 기다린다.
+  private paymentBurstWindowMs(): number {
+    return Number(
+      this.config.get<string>('LOAD_TEST_PAYMENT_BURST_WINDOW_MS') ?? 3_000,
+    );
+  }
+
+  // Little's Law(L = λ·W) — burst 윈도우(W) 안에 결제까지 끝나려면, 동시에
+  // "이미 허가돼 결제 처리 중인" 인원(L)이 처리량(λ)×burst 윈도우를 넘으면
+  // 안 된다.
   private maxInFlight(): number {
     return Math.floor(
-      this.paymentThroughputPerSec() * (this.admissionWindowMs() / 1000),
+      this.paymentThroughputPerSec() * (this.paymentBurstWindowMs() / 1000),
     );
   }
 

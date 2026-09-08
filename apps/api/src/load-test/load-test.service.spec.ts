@@ -113,6 +113,15 @@ describe('LoadTestService (통합 — 대용량 트래픽 테스트, ADR 0016 �
       await expect(service.simulateLoad(1, otherUser.id)).resolves.toEqual({ accepted: 1 });
     });
 
+    it('호출하면 요청된 투입 수를 requestedInjectionKey에 누적한다', async () => {
+      await service.simulateLoad(3, userId);
+      const event = await prisma.event.findUnique({ where: { loadTestOwnerId: userId } });
+
+      await expect(
+        redis.get(`loadtest:injection:requested:${event!.id}`),
+      ).resolves.toBe('3');
+    });
+
     it('처음 호출하면 이 유저 전용 대용량 테스트 이벤트가 생성된다', async () => {
       await service.simulateLoad(1, userId);
 
@@ -217,6 +226,46 @@ describe('LoadTestService (통합 — 대용량 트래픽 테스트, ADR 0016 �
       });
 
       createSpy.mockRestore();
+    });
+  });
+
+  // 2026-09-05 사용자 요청 — 가상 유저는 simBatchSize()만큼씩 나눠 생성되므로
+  // (초당 200명), 대량 투입 중엔 "아직 User row도 안 만들어진" 대기 인원이
+  // 존재하는데 지금까지는 안 보였다. 실제 배치 타이밍에 의존하면 테스트가
+  // 느려지고 불안정해지므로(다른 stats 필드 테스트와 같은 관례), 카운터
+  // 자체를 redis.set으로 직접 세팅해 계산식만 검증한다.
+  describe('투입 진행 상황(pendingInjectionCount)', () => {
+    it('요청된 투입 수보다 실제 투입 완료 수가 적으면 그 차이를 보여준다', async () => {
+      const result = await service.reset(50, userId);
+      const eventId = result.event.id;
+      await redis.set(`loadtest:injection:requested:${eventId}`, '500');
+      await redis.set(`loadtest:injection:injected:${eventId}`, '120');
+
+      const msg = await firstValueFrom(await service.streamStats(userId));
+
+      expect(msg.data).toMatchObject({ pendingInjectionCount: 380 });
+    });
+
+    it('투입이 요청 수만큼 끝나면 0이다', async () => {
+      const result = await service.reset(50, userId);
+      const eventId = result.event.id;
+      await redis.set(`loadtest:injection:requested:${eventId}`, '100');
+      await redis.set(`loadtest:injection:injected:${eventId}`, '100');
+
+      const msg = await firstValueFrom(await service.streamStats(userId));
+
+      expect(msg.data).toMatchObject({ pendingInjectionCount: 0 });
+    });
+
+    it('리셋하면 투입 진행 카운터(요청/완료)도 0으로 초기화된다', async () => {
+      const first = await service.reset(50, userId);
+      await redis.set(`loadtest:injection:requested:${first.event.id}`, '500');
+      await redis.set(`loadtest:injection:injected:${first.event.id}`, '120');
+
+      await service.reset(60, userId); // 같은 유저 → 같은 이벤트 재사용
+
+      const msg = await firstValueFrom(await service.streamStats(userId));
+      expect(msg.data).toMatchObject({ pendingInjectionCount: 0 });
     });
   });
 
@@ -328,6 +377,7 @@ describe('LoadTestService (통합 — 대용량 트래픽 테스트, ADR 0016 �
         abandonedCount: 2,
         systemErrorCount: 0,
         admissionQueueCount: 2,
+        pendingInjectionCount: 0,
       });
 
       confirmQueueMock.getWaitingCount.mockResolvedValue(0);

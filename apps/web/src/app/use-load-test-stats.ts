@@ -19,6 +19,7 @@ export interface LoadTestStats {
   abandonedCount: number;
   systemErrorCount: number;
   admissionQueueCount: number;
+  pendingInjectionCount: number;
 }
 
 // useDemoStats()와 같은 구조(EventSource 구독) — 엔드포인트와 타입만 다르다.

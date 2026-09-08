@@ -31,7 +31,11 @@ describe('LoadTestAdmissionProcessor (통합 — 대용량 입장 처리, ADR 00
   const eventId = 9101;
   const MIN_BATCH = 50;
   const MAX_BATCH = 100;
-  // 백프레셔 테스트용 — 처리량 10건/초 × 허가창 5초(아래 WINDOW_MS) = 50명.
+  // 백프레셔 테스트용 — 처리량 10건/초 × burst 윈도우 5초(아래 BURST_WINDOW_MS) = 50명.
+  // 2026-09-05 — 원래는 이 계산이 ADMISSION_WINDOW_MS(사람이 반응할 시간, 30초)를
+  // 그대로 재사용했는데, 그러면 30초치(=1,800명)까지 동시에 결제 시도가 몰려도
+  // 돼 처리량을 올려도 순간 부하가 여전히 컸다 — "허가창"과 "동시 결제 허용치"는
+  // 서로 다른 개념이라 분리했다(사용자 지적, ADR 0018 철회 이력 참고).
   const MAX_IN_FLIGHT = 50;
 
   beforeAll(async () => {
@@ -49,6 +53,7 @@ describe('LoadTestAdmissionProcessor (통합 — 대용량 입장 처리, ADR 00
     // 둬서, admit()이 실제로 이 값을 쓰는지(캐주얼 기본값이 새지 않았는지)
     // 아래 테스트에서 확인한다(2026-08-26).
     process.env.LOAD_TEST_ADMISSION_WINDOW_MS = '5000';
+    process.env.LOAD_TEST_PAYMENT_BURST_WINDOW_MS = '5000';
 
     moduleRef = await Test.createTestingModule({
       imports: [
@@ -100,6 +105,7 @@ describe('LoadTestAdmissionProcessor (통합 — 대용량 입장 처리, ADR 00
     delete process.env.LOAD_TEST_ADMISSION_MAX_BATCH;
     delete process.env.LOAD_TEST_ADMISSION_INTERVAL_MS;
     delete process.env.LOAD_TEST_ADMISSION_WINDOW_MS;
+    delete process.env.LOAD_TEST_PAYMENT_BURST_WINDOW_MS;
     delete process.env.LOAD_TEST_PAYMENT_THROUGHPUT_PER_SEC;
     // ⚠️ admission.processor.spec.ts와 같은 이유로 obliterate()를 안 쓴다.
     await moduleRef.close();
@@ -276,6 +282,29 @@ describe('LoadTestAdmissionProcessor (통합 — 대용량 입장 처리, ADR 00
 
       const remaining = await queueService.size(bpEventId);
       expect(500 - remaining).toBe(20);
+    });
+
+    // 2026-09-05 — "허가창(사람이 반응할 시간)"과 "동시 결제 허용치"를
+    // 분리했다. LOAD_TEST_ADMISSION_WINDOW_MS를 아무리 늘려도(=사람에게 더
+    // 여유를 줘도) maxInFlight(=LOAD_TEST_PAYMENT_BURST_WINDOW_MS 기준)는
+    // 안 커져야, 결제 단계에 몰릴 수 있는 최대 동시 인원이 항상 처리량에
+    // 맞게 작게 유지된다.
+    it('허가창(LOAD_TEST_ADMISSION_WINDOW_MS)을 늘려도 백프레셔 상한은 안 커진다(burst 윈도우로 분리)', async () => {
+      process.env.LOAD_TEST_ADMISSION_WINDOW_MS = '30000'; // 실제 기본값 수준으로 확 늘림
+      try {
+        await seedHeld(MAX_IN_FLIGHT); // burst 윈도우(5초) 기준 상한만큼 이미 HELD
+        for (let userId = 1; userId <= 500; userId++) {
+          await queueService.joinLoadTest(bpEventId, userId);
+        }
+
+        await processor.process({} as Job);
+
+        // 허가창을 6배(5초→30초) 늘렸어도 여전히 아무도 새로 허가 안 됨 —
+        // maxInFlight가 허가창이 아니라 burst 윈도우를 본다는 뜻.
+        await expect(queueService.size(bpEventId)).resolves.toBe(500);
+      } finally {
+        process.env.LOAD_TEST_ADMISSION_WINDOW_MS = '5000'; // 다음 테스트를 위해 복원
+      }
     });
   });
 });

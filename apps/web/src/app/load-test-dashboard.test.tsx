@@ -28,6 +28,7 @@ const sampleStats: LoadTestStats = {
   abandonedCount: 70,
   systemErrorCount: 10,
   admissionQueueCount: 60,
+  pendingInjectionCount: 40,
 };
 
 describe("LoadTestDashboard", () => {
@@ -77,9 +78,10 @@ describe("LoadTestDashboard", () => {
     expect(screen.getByText("아직 결과가 없습니다.")).toBeInTheDocument();
   });
 
-  it("세부 수치(확보중/입장대기중/큐적체)는 조용한 스트립으로 보여준다", () => {
+  it("세부 수치(투입대기중/확보중/입장대기중/큐적체)는 조용한 스트립으로 보여준다", () => {
     renderWithQuery(sampleStats);
 
+    expect(screen.getByText("투입 대기중").nextSibling).toHaveTextContent("40");
     expect(screen.getByText("확보중(HELD)").nextSibling).toHaveTextContent("20");
     expect(screen.getByText("입장 대기중").nextSibling).toHaveTextContent("60");
     expect(screen.getByText("확정 큐 적체").nextSibling).toHaveTextContent("5");

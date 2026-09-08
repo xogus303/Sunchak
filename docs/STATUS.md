@@ -5,7 +5,11 @@
 > - **세션 시작 시**: 이 파일을 가장 먼저 읽고 "다음 할 일"부터 이어간다.
 > - **세션 끝 / 커밋 전**: 이 파일을 **덮어써서** 최신 상태로 갱신한다. (시간순 이력·삽질은 `DEVLOG.md`, 결정 근거는 `decisions/`)
 
-**마지막 업데이트:** 2026-09-01 (**sweep에 이단계 만료 기준 도입 — 결제 시도 중인 예매는 촘촘한 TTL에서 제외(ADR 0023 후속), divergence 1,199→74→0대로 마무리** — 백프레셔+HELD 가드(직전 항목) 배포 후 3,000 VU로 재검증하니 `Payment PAID − Reservation CONFIRMED` 불일치가 1,199→74건(94% 감소)까지 줄었지만 0은 아니었음. 추적해보니 `payment.processor.ts`의 가드는 "그 순간" HELD인지만 확인하고 confirm 큐에 job을 넘기는데, **그 job이 처리되길 기다리는 동안**에도 `SweepProcessor`가 여전히 벽시계 TTL만 보고 회수할 수 있어 같은 경합이 결제 큐 경계에서 확정 큐 경계로 옮겨 훨씬 작게 남아있었던 것 — 예전에 논의만 하고 미뤄뒀던 "sweep이 결제 시도 중인 예매는 안 건드린다"는 이단계 설계였다. 사용자가 "마저 제거" 확정. **수정**: `sweep.processor.ts`를 이단계로 — ①결제 시도(Payment row) **없는** HELD만 기존 30초 TTL로 회수(진짜 이탈) ②결제 시도 **있는** HELD는 이 TTL에서 빼고 결제/확정 큐가 스스로 확정짓게 맡기되, "결제 job이 영영 안 끝나는" 진짜 장애만 잡는 별도의 관대한 안전망(`PAYMENT_ATTEMPT_FALLBACK_MS`=5분, `createdAt` 기준) 신설 — 한 SQL에 `NOT EXISTS(payments)` OR 조건으로 결합해 원자성 유지. **테스트**: `sweep.processor.spec.ts` 2건 추가(결제 시도 중엔 안 건드림 / 5분 넘으면 안전망으로 회수). **API 140→142 그린.** 자세한 내용은 `docs/DEVLOG.md` 2026-09-01 항목·ADR 0023 참고. 이전 백프레셔 도입 요약은 아래 유지)
+**마지막 업데이트:** 2026-09-05 (**결제 우선순위 철회 → job당 DB 왕복 축소(처리량 2배) + 백프레셔 burst 윈도우 분리(아직 push 안 함)** — 바로 아래 항목(결제 큐 우선순위)을 사용자가 반박: "내 결제만 안 느리게 만든 것뿐, 결제 시스템 처리 속도 자체가 느려선 안 된다"는 원칙은 안 풀렸다는 지적. 재조사 결과 진짜 병목은 `payment.processor.ts`가 job 하나당 Neon에 순차 2~3회 왕복(왕복당 약 100ms)하는 것 — 우선순위 코드를 전부 철회(ADR 0018에 "철회" 절로 기록)하고 대신 ①성공/실패 분기 각각을 raw SQL 한 문장으로 합쳐 왕복을 2~3회→1회로 줄임(이론상 처리량 2배, 초당 약 70→140건) ②`load-test-admission.processor.ts`의 `maxInFlight` 계산이 "입장 허가창"(사람 반응 속도, 30초)과 "동시 결제 허용치"(뒷단 처리 능력)를 같은 숫자로 섞어 쓰던 걸 분리 — 신규 `LOAD_TEST_PAYMENT_BURST_WINDOW_MS`(기본 3초)로 `maxInFlight`를 1,800→180으로 축소, 넘치는 인원은 결제 단계가 아니라 입장 대기열에서 기다리게 함(ADR 0023에 개정 이력). **테스트**: 우선순위 테스트 2건 제거, burst 윈도우 분리 확인 1건 추가 — **API 148→147 그린**, tsc 클린. **SSH 권한 요청은 미해결**(update-config 스킬 호출 자체도 auto mode 분류기가 차단 — 사용자가 직접 설정 필요). 자세한 내용은 `docs/DEVLOG.md` 2026-09-05(두 번째 항목)·ADR 0018/0023 개정 이력 참고. 이전(우선순위 도입 시점) 요약은 아래 유지)
+
+**이전 업데이트 (2026-09-05, 4가지 처리 — 결제 우선순위 버전, 이후 철회됨):** (**배포 사이트 실사용 중 발견한 4가지 처리 — 결제·확정 큐 우선순위 도입(ADR 0018 개정)·포기 확률 0.2→0.08·"투입 대기중" 카운터 신설(아직 push 안 함)** — 사용자가 배포 사이트에서 재고 10,000·VU 5,000 재현 후 ①포기 988건(19.8%)이 너무 많다 ②본인 결제가 수십 초 멈춘다 ③완료 상태 정합성 ④아직 대기열에도 못 들어간 인원이 안 보인다, 4가지를 지적. 조사 결과 ①은 버그가 아니라 `DEMO_SIM_ABANDON_PROBABILITY`(기본 0.2)로 설계된 확률(캐주얼과 공유) — 사용자 요청으로 0.08로 하향. ②는 인위적 지연이 아니라 결제 큐 적체(concurrency=20, 실측 처리량 초당 약 70건)가 원인 — 사용자가 "입장 대기는 남을 기다려도 되지만 결제까지 남의 결제를 기다리는 건 잘못된 설계"라고 지적, 정확한 지적이었음. 처음엔 "결제 큐를 대용량/실제용으로 물리적 분리"를 검토했으나 사용자 본인의 클릭도 그 대용량 테스트의 참여자라 분리해도 해결 안 됨을 논의 중 확인 — 대신 `payments.service.ts`가 예약자 이메일이 `@sunchak.demo`(가상 유저 공통 도메인)로 끝나는지로 실제/가상을 판별해 가상 유저 job에만 BullMQ priority를 걸었다(priority 없는 job이 항상 먼저 처리되는 BullMQ 특성 이용) — 실제 유저는 가상 유저 규모와 무관하게 결제·확정이 즉시 처리된다(ADR 0018 개정). ④는 Redis에 "요청 총원/투입 완료 수" 두 카운터를 신설해 `pendingInjectionCount`로 노출. ③(완료 상태 정합성)은 SSH가 auto mode에서 막혀 이번 세션엔 확인 못 함 — 사용자에게 읽기 전용 SELECT 스크립트 전달, 회신 대기 중. **테스트**: 결제 우선순위 2건(payments.service/payment.processor 각 1건) + pendingInjectionCount 계산 3건 + 요청 카운터 누적 1건 신규. **API 142→148 그린**(admission 스펙 2건이 전체 스위트 동시 실행 시 간헐 실패했으나 단독 실행 시 통과 — 2026-09-01에 이미 기록된 기존 flaky 이슈, 이번 변경과 무관). web 62개 그린, tsc(api/web)·eslint(web) 클린. 자세한 내용은 `docs/DEVLOG.md` 2026-09-05 항목·ADR 0018 개정 이력 참고. 이전 sweep 이단계 요약은 아래 유지)
+
+**이전 업데이트:** 2026-09-01 (**sweep에 이단계 만료 기준 도입 — 결제 시도 중인 예매는 촘촘한 TTL에서 제외(ADR 0023 후속), divergence 1,199→74건까지 확인·구현 완료, 74→0 최종 재검증은 아직 안 함** — 백프레셔+HELD 가드(직전 항목) 배포 후 3,000 VU로 재검증하니 `Payment PAID − Reservation CONFIRMED` 불일치가 1,199→74건(94% 감소)까지 줄었지만 0은 아니었음. 추적해보니 `payment.processor.ts`의 가드는 "그 순간" HELD인지만 확인하고 confirm 큐에 job을 넘기는데, **그 job이 처리되길 기다리는 동안**에도 `SweepProcessor`가 여전히 벽시계 TTL만 보고 회수할 수 있어 같은 경합이 결제 큐 경계에서 확정 큐 경계로 옮겨 훨씬 작게 남아있었던 것 — 예전에 논의만 하고 미뤄뒀던 "sweep이 결제 시도 중인 예매는 안 건드린다"는 이단계 설계였다. 사용자가 "마저 제거" 확정. **수정**: `sweep.processor.ts`를 이단계로 — ①결제 시도(Payment row) **없는** HELD만 기존 30초 TTL로 회수(진짜 이탈) ②결제 시도 **있는** HELD는 이 TTL에서 빼고 결제/확정 큐가 스스로 확정짓게 맡기되, "결제 job이 영영 안 끝나는" 진짜 장애만 잡는 별도의 관대한 안전망(`PAYMENT_ATTEMPT_FALLBACK_MS`=5분, `createdAt` 기준) 신설 — 한 SQL에 `NOT EXISTS(payments)` OR 조건으로 결합해 원자성 유지. **테스트**: `sweep.processor.spec.ts` 2건 추가(결제 시도 중엔 안 건드림 / 5분 넘으면 안전망으로 회수). **API 140→142 그린.** 자세한 내용은 `docs/DEVLOG.md` 2026-09-01 항목·ADR 0023 참고. 이전 백프레셔 도입 요약은 아래 유지)
 
 **이전 업데이트 (2026-09-01, 백프레셔 도입):** (**대용량 테스트 입장 허가에 백프레셔 도입(ADR 0023) — Little's Law로 "밀리면 스스로 느려지는" 구조로 전환** — concurrency=20 수정 배포 후 3,000 VU로 재현해보니 확정(CONFIRMED)이 32→688건으로 정확히 20배 개선됐지만, `Payment PAID(1,887)`와 `Reservation CONFIRMED(688)` 사이 1,199건 divergence가 여전히 남음 — concurrency를 올려도 VU 규모를 키우면 다시 재현되는 구조적 문제였음. **사용자가 근본 방향을 재차 지적**("job이 30초 넘게 막히는 게 정상인가, 물리적 성능 증설만이 답인가") — 확인해보니 `LoadTestAdmissionProcessor`의 입장 허가 배치 계산이 **대기열 크기만 볼 뿐 결제 파이프라인의 실제 처리량과는 무관**했던 게 진짜 원인. **결정(ADR 0023)**: Little's Law(`L=λ·W`)를 적용 — 매 틱 "지금 이미 HELD로 결제 처리 중인 인원(L)"을 재서, "처리량(λ)×허가창(W)"을 넘지 않을 만큼만 새로 허가. 뒷단이 밀리면 admission이 스스로 느려지고, 넘친 인원은 TTL 없는 대기열에서 계속 기다릴 뿐 아무도 조용히 사라지지 않음. **처리량 실측**: 5,000명으로 결제 큐를 포화시킨 뒤 `Payment.updatedAt` 분포 측정 — 순수 백로그 처리 구간 평균 초당 70.8건, 여유를 두고 **60**을 기본값(`LOAD_TEST_PAYMENT_THROUGHPUT_PER_SEC`)으로 채택. **보완**: `payment.processor.ts` 성공 경로에도 실패 경로와 대칭으로 HELD 재확인 가드 추가 — sweep이 먼저 회수했으면 아무리 늦게 처리돼도 PAID로 안 남고 FAILED로 정직하게 처리(백프레셔가 "빈도"를, 이 가드가 "겪었을 때의 정직함"을 담당 — 역할이 다름). **VU/재고 상한(1만) 상향은 백프레셔가 전제조건이라 이번엔 안 하고 사용자와 합의해 별도 백로그로 미룸.** **테스트**: `load-test-admission.processor.spec.ts` 백프레셔 describe 신설 2건(진짜 Event/User로 HELD 시딩), `payment.processor.spec.ts`에 성공-경로-가드 1건. **API 137→140 그린.** ADR README에 그동안 누락됐던 0019~0022도 함께 백필. 자세한 내용은 `docs/DEVLOG.md` 2026-09-01 항목·ADR 0023 참고. 이전 concurrency 수정 요약은 아래 유지)
 
@@ -261,7 +265,10 @@
   - **잡일 2건 같이 처리**: ① `/events` 판매중 카드에 `cursor-pointer` 추가(버튼 기본 커서가 `pointer`가 아니라 호버해도 클릭 가능해 보이지 않던 문제, 빌드 CSS 산출물로 확인). ② 백로그의 "`simulateLoad()` 쿨다운이 이벤트 확인보다 먼저 걸리는 문제"는 재확인 결과 이미 해소된 stale 이슈로 판명(2026-08-07 유저별 격리 작업에서 `findOrCreateOwnDemoEvent()`가 이벤트를 자동 생성하도록 바뀌어 애초에 404가 안 남) — 코드 변경 없이 정리. npm 보안 검토 자동화 백로그 항목은 사용자 요청으로 제거.
 
 ## 🔨 진행 중 / 막힌 것
-- (막힌 것 없음.)
+- **sweep 이단계화(ADR 0023 후속) + 결제 job당 DB 왕복 축소·백프레셔 burst 윈도우 분리 실서버 재검증 대기 중** — 코드·단위테스트는 전부 완료(147개 그린), 후자는 아직 push도 안 함. 실서버에서 divergence가 0에 수렴하는지, 처리량이 실제로 2배 가까이 올랐는지, 우선순위 없이도 본인 결제 체감이 충분히 빠른지 셋 다 아직 미확인. 막힌 건 아니고 다음 세션(또는 사용자가 준비되는 대로)에 진행. 아래 "다음 할 일" 10번 참고.
+- **배포 VM `api.env`의 `DEMO_SIM_ABANDON_PROBABILITY` 수동 갱신 필요** — 코드 기본값은 0.08로 바꿨지만 VM이 이 값을 명시적으로 설정해뒀다면 코드 기본값 변경만으론 안 먹힘. SSH가 auto mode에서 막혀 사용자가 직접 해야 함(아래 "다음 할 일" 10-2 참고).
+- **SSH 권한을 auto mode에서 여전히 못 씀** — 사용자가 settings.json에 SSH 허용 규칙을 추가해달라고 요청했으나, `update-config` 스킬 호출 자체도 분류기가 차단해 에이전트가 대신 설정할 수 없음을 확인. 사용자가 직접 `/config` 또는 `.claude/settings.json`을 편집해야 함.
+- (그 외 막힌 것 없음.)
 - ✅ ~~ADR 0021 VM 미배포~~ — CD 자동화(ADR 0022)로 반영 완료(2026-08-22).
 - ✅ ~~ADR 0017 백로그 항목 1(순번 실시간화 + ETA)~~ — 구현·검증 완료(2026-08-25).
 - ✅ ~~ADR 0017 백로그 항목 2 / ADR 0016 대용량 트래픽 대응~~ — 설계·구현·검증 완료(2026-08-25). Neon 예산 게이트(3중 게이트 중 3번째)는 실측 근거로 스킵 결정, ADR 0016에 개정 이력으로 기록 완료.
@@ -281,11 +288,44 @@
    7. ✅ ~~**(필수) ADR·설계 문서 최신화**~~ — Explore 서브에이전트로 `docs/decisions/` 전체를 코드와 대조(2026-08-21). 새 드리프트 3건 발견·개정 이력으로 반영: 0017(대기열 score를 `Date.now()`→Redis `INCR`로 교체한 버그 수정 2건 미기록), 0019(VM 공급자가 계획한 Oracle Cloud Always Free가 아니라 AWS EC2로 전환된 사실 미반영), 0011(2026-08-08 개정 이력이 예고한 "배포 시점 재검토"가 실제로 이뤄져 "로컬 `.env` 수동 관리"로 정식 Superseded 확정). 0010/0013/0016/0018은 이미 반영돼 있어 추가 조치 불필요. **배포 6단계 전부 완료.**
    - (여유 있으면 스트레치, 필수 아님) 분산 락(Redlock)·read replica·Terraform·K8s.
 3. ✅ ~~`simulateLoad()`가 쿨다운을 데모 이벤트 확인보다 먼저 거는 순서 정리~~ — **재확인 결과 stale(2026-08-25)**: 이 항목은 2026-08-05에 기록됐는데, 이틀 뒤(2026-08-07) "유저별 데모 격리" 작업에서 이벤트 조회 방식이 `findOrCreateOwnDemoEvent()`로 바뀌어 이벤트가 없으면 그 자리에서 자동 생성하도록 변경됨(`events.service.ts:57`) — 404 자체가 더 이상 발생하지 않아 "쿨다운만 소비되고 404로 실패"하는 시나리오가 사라졌다. 테스트에도 이미 회귀 케이스로 반영돼 있음(`demo.service.spec.ts:160`). 코드 변경 불필요, 해소로 정리.
-4. ✅ ~~대용량 트래픽 테스트 프론트엔드 화면 신설 + 1인칭 대기열 체험 + 자동 세팅 + 대기열 형성 후 참여 + UI 레이아웃 개선(옵션 B) + ETA·허가창·admit() 동시성·재고 음수 고정·게이트 토큰 만료 버그 수정~~ — 구현·로컬 브라우저 e2e 검증 완료(2026-08-26~27, `docs/DEVLOG.md` 참고). **다음 세션 최우선 — 이어서 push+배포**:
-   1. `git push` → ADR 0022 CD 자동화(`ci.yml`→`cd.yml`)로 라이브 VM에 배포
-   2. 배포된 사이트(`https://app.15.164.234.208.sslip.io/load-test`)에서 브라우저로 직접 확인
-   - 로컬이 `origin/main`보다 여러 커밋 앞선 상태 — 아직 push 안 함(대기열 ETA·커서 수정·대용량 트래픽 백엔드+프론트·ADR 0016 기록 등). 이번 세션엔 로컬 e2e(curl+Playwright)까지만 검증, 배포 VM·브라우저 둘 다 미검증.
-5. (선택) ADR 0016 백로그 — Grafana에 "Neon 예산 잔량" 패널 추가. 예산 게이트 자체는 스킵하기로 했지만 콘솔을 수동으로 안 보고도 확인하고 싶으면 고려. 필수 아님.
+4. ✅ ~~대용량 트래픽 테스트 프론트엔드 화면 신설 + 1인칭 대기열 체험 + 자동 세팅 + 대기열 형성 후 참여 + UI 레이아웃 개선(옵션 B) + ETA·허가창·admit() 동시성·재고 음수 고정·게이트 토큰 만료 버그 수정~~ — 구현·로컬 브라우저 e2e 검증 완료(2026-08-26~27).
+5. ✅ ~~배포 환경 커넥션 풀 고갈 발견·수정 + 결과 카운터 정직화(시스템 오류 카테고리)~~ (2026-08-31, push·배포·실측 완료)
+6. ✅ ~~BullMQ 워커 concurrency 기본값(1) 발견·수정 + 백프레셔 도입(ADR 0023) + payment/sweep 정합성 가드~~ (2026-09-01, push·배포 완료). 3,000 VU 재현으로 `Payment PAID − Reservation CONFIRMED` divergence 1,199→74건(94% 감소)까지 확인.
+7. ✅ ~~배포 사이트에서 재고 10,000·VU 5,000 재현~~(2026-09-05, 사용자 직접) — 확정 3,203·결제실패 810·재고소진 0·포기 988·시스템오류 0(총 5,001건). 이 결과를 보고 사용자가 4가지 지적 → 조사·수정 완료(8번).
+8. ✅ ~~(철회됨, 아래 9번으로 대체) 결제·확정 큐 우선순위 도입(ADR 0018 개정)~~ + ✅ ~~포기 확률 0.2→0.08~~ + ✅ ~~"투입 대기중" 카운터 신설~~ — 우선순위 부분은 사용자가 "내 결제만 안 느리게 만든 것뿐, 결제 시스템 처리 속도 자체가 안 느려야 한다"고 반박해 전량 철회(ADR 0018에 "철회" 절 기록), 포기 확률·투입 대기 카운터는 그대로 유지. 상세는 `docs/DEVLOG.md` 2026-09-05 항목 참고.
+9. ✅ ~~job당 DB 왕복 축소(payment.processor.ts, 이론상 처리량 2배) + 백프레셔 burst 윈도우 분리(ADR 0023 개정, LOAD_TEST_PAYMENT_BURST_WINDOW_MS 신규)~~(2026-09-05, 구현·단위테스트 147개 그린·tsc 클린 — **아직 push 안 함**). 상세는 `docs/DEVLOG.md` 2026-09-05(두 번째 항목) 참고.
+10. **최우선(진행 중)** — sweep 이단계화(74건 divergence) + 9번(처리량 개선·burst 분리) 둘 다 **실서버 재검증은 아직 안 함**:
+   1. 9번을 push → CI/CD 배포 확인
+   2. **배포 VM의 `~/sunchak/api.env`에 `DEMO_SIM_ABANDON_PROBABILITY`가 명시돼 있으면 0.08로 직접 수정**(SSH가 auto mode에서 막혀 에이전트가 못 함 — `update-config` 스킬 호출 자체도 분류기가 차단함을 확인, 사용자가 직접 설정 필요) + Infisical도 동일 반영
+   3. 배포 사이트(`/load-test`)에서 재고 5,000·VU 3,000(또는 더 큰 규모)으로 재현 — 이번엔 ①본인 결제가 즉시 처리되는지(우선순위 없이 burst 제한만으로 충분한지) ②실측 처리량이 실제로 2배 가까이 올랐는지도 같이 확인
+   4. 수치 변화가 멎을 때까지 대기 후, 아래 SSH 스크립트(읽기 전용 SELECT)로 해당 이벤트의 `Payment` PAID 건수와 `Reservation` CONFIRMED 건수를 직접 대조 — divergence가 0(또는 안전망 케이스만)인지 확인:
+      ```bash
+      ssh -i ~/Desktop/aws/sunchak-key.pem ubuntu@15.164.234.208 bash -s <<'EOF'
+      cat > /tmp/check-divergence.js <<'JS'
+      const { PrismaClient } = require('@prisma/client');
+      const p = new PrismaClient();
+      (async () => {
+        const rows = await p.$queryRawUnsafe(`
+          SELECT e.id AS event_id,
+            (SELECT count(*) FROM reservations r WHERE r."eventId" = e.id AND r.status = 'CONFIRMED') AS reservation_confirmed,
+            (SELECT count(*) FROM payments pay JOIN reservations r2 ON pay."reservationId" = r2.id WHERE r2."eventId" = e.id AND pay.status = 'PAID') AS payment_paid,
+            (SELECT count(*) FROM reservations r3 WHERE r3."eventId" = e.id) AS total_reservations
+          FROM events e
+          WHERE e."loadTestOwnerId" IS NOT NULL
+          ORDER BY e."createdAt" DESC
+          LIMIT 1
+        `);
+        console.log(JSON.stringify(rows, null, 2));
+        await p.$disconnect();
+      })();
+      JS
+      docker cp /tmp/check-divergence.js sunchak-api:/tmp/check-divergence.js
+      docker exec sunchak-api node /tmp/check-divergence.js
+      EOF
+      ```
+   5. 결과를 `docs/DEVLOG.md` 2026-09-05 항목 끝에 추가 기록 + 이 STATUS.md 갱신
+11. (선택) ADR 0016 백로그 — Grafana에 "Neon 예산 잔량" 패널 추가. 예산 게이트 자체는 스킵하기로 했지만 콘솔을 수동으로 안 보고도 확인하고 싶으면 고려. 필수 아님.
+12. (선택, 백로그로 미뤄둠) VU/재고 상한(현재 1만) 상향 — 백프레셔 도입이 전제조건이었고 이제 갖춰졌으므로 검토 가능(ADR 0023 참고, 2026-09-01 사용자와 합의해 이번 범위에서는 보류).
 
 ## 🚀 배포 VM 정보 (AWS EC2, 2026-08-19 발급)
 - **리전**: 아시아 태평양(서울) `ap-northeast-2`. (처음 버지니아로 잘못 만들었다가 재생성 — 리전 간 인스턴스 이동 불가, AMI·키 페어·보안 그룹 전부 리전별 별개라는 점 확인함.)
@@ -317,7 +357,7 @@
 - **이 기기 `.env`에 `DEMO_GATE_PASSWORD="sunchak-demo"` 추가함(2026-08-06)** — 프론트 게이트 화면을 테스트하려면 필요(미설정 시 게이트 자동 비활성화). 값은 비밀이 아니라 원하면 바꿔도 무방.
 
 ## 🧪 테스트 실행법
-- `cd apps/api && pnpm exec jest`(전체 133개 — 2026-08-27 기준. `load-test.service.spec.ts`에 `streamStats`+`joinQueue`/`streamQueueStatus`+활동 신호 갱신 통합 테스트 7건, `events.service.spec.ts`에 `findOrCreateOwnLoadTestEvent` P2002 경합 회귀 테스트 2건, `queue.service.spec.ts`에 `AdmissionModel` 기반 ETA·`windowMs` 파라미터 계산 4건, `load-test-admission.processor.spec.ts`에 허가창 값 확인 1건, `demo.service.spec.ts`에 활동 신호 갱신 1건 신규). 사전조건: 로컬 PG·Redis 기동. ⚠️ `start:dev`를 정상 종료 없이 내린 뒤 카운트 단언이 흔들리면 위 "진행 중/막힌 것"의 BullMQ 유령 스케줄러 항목 참고(`redis-cli FLUSHALL`로 해결).
+- `cd apps/api && pnpm exec jest`(전체 147개 — 2026-09-05 기준, 그 사이 늘어난 내역은 `docs/DEVLOG.md` 참고. `load-test.service.spec.ts`에 `streamStats`+`joinQueue`/`streamQueueStatus`+활동 신호 갱신 통합 테스트 7건, `events.service.spec.ts`에 `findOrCreateOwnLoadTestEvent` P2002 경합 회귀 테스트 2건, `queue.service.spec.ts`에 `AdmissionModel` 기반 ETA·`windowMs` 파라미터 계산 4건, `load-test-admission.processor.spec.ts`에 허가창 값 확인 1건, `demo.service.spec.ts`에 활동 신호 갱신 1건 신규). 사전조건: 로컬 PG·Redis 기동. ⚠️ `start:dev`를 정상 종료 없이 내린 뒤 카운트 단언이 흔들리면 위 "진행 중/막힌 것"의 BullMQ 유령 스케줄러 항목 참고(`redis-cli FLUSHALL`로 해결).
 - `cd apps/web && pnpm test`(전체 62개, Vitest — 2026-08-27 기준. `booking-form.test.tsx`에 게이트/로그인 만료 시 재시작 버튼 테스트 2건 추가(대용량 모드 2건 포함 총 12건), `load-test-dashboard.test.tsx` 신규 10건, `load-test/page.test.tsx` 5건, `demo-dashboard.test.tsx`는 `stat-tiles.tsx` 공용 컴포넌트 도입에 맞춰 import만 조정, 루트 `page.test.tsx`에 `checkStatus()` fetch 실패 회귀 테스트 2건). ⚠️ 이 세션 bash 환경에 `NODE_ENV=production`이 섞여들면 `React.act is not a function`으로 전부 깨진다(코드 문제 아님) — `NODE_ENV=test pnpm test`로 덮어써서 실행.
 - **테스트 후 데모 이벤트가 지워진다**(위 참고) — 브라우저로 다시 보려면 `pnpm exec prisma db seed` + `POST /demo/reset` 필요.
 - ⚠️ 실DB를 쓰는 통합 스펙 파일이 여러 개(reservations/sweep/reconcile/demo)라 **`maxWorkers: 1`(package.json jest 설정)로 직렬 실행** — 병렬 실행 시 서로의 `beforeEach` 전체삭제가 충돌한다(2.5에서 발견).

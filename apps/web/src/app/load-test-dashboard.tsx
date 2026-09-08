@@ -158,6 +158,7 @@ export function LoadTestDashboard({ stats, streamError, sectionLabel }: LoadTest
         />
         <DetailStrip
           items={[
+            { label: "투입 대기중", value: stats?.pendingInjectionCount ?? 0 },
             { label: "확보중(HELD)", value: stats?.heldCount ?? 0 },
             { label: "입장 대기중", value: stats?.admissionQueueCount ?? 0 },
             { label: "확정 큐 적체", value: stats?.queueBacklog ?? 0 },

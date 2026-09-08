@@ -50,6 +50,11 @@ export interface LoadTestStats {
   // 고쳤지만, 남는 산발적 실패까지 정직하게 보여주기 위해 신설.
   systemErrorCount: number;
   admissionQueueCount: number;
+  // 2026-09-05 — "아직 대기열에도 못 들어간 인원"(사용자 요청). 가상 유저는
+  // simBatchSize()만큼씩 나눠 생성되므로(초당 200명), 5,000명을 투입해도
+  // 전부 User row+대기열 진입을 마치기까지 수십 초 걸린다 — 그동안
+  // admissionQueueCount만 봐서는 "몇 명이 아직 투입 중인지"가 안 보였다.
+  pendingInjectionCount: number;
 }
 
 // 리셋 없이 첫 simulate 호출로 이벤트가 자동 생성될 때의 기본 재고 — 캐주얼
@@ -142,7 +147,7 @@ export class LoadTestService {
   // 재사용한다(값을 공유할 뿐 코드 의존은 없음 — LoadTestService는
   // DemoService를 참조하지 않는다).
   private abandonProbability(): number {
-    return Number(this.config.get<string>('DEMO_SIM_ABANDON_PROBABILITY') ?? 0.2);
+    return Number(this.config.get<string>('DEMO_SIM_ABANDON_PROBABILITY') ?? 0.08);
   }
   private minBookingDelayMs(): number {
     return Number(this.config.get<string>('DEMO_SIM_MIN_BOOKING_DELAY_MS') ?? 500);
@@ -155,6 +160,15 @@ export class LoadTestService {
 
   private cooldownKey(userId: number): string {
     return `loadtest:sim:cooldown:${userId}`;
+  }
+
+  // 투입 진행 상황(요청 총원 vs 실제 투입 완료 수) 추적용 — pendingInjectionCount
+  // 계산에 쓴다(2026-09-05).
+  private requestedInjectionKey(eventId: number): string {
+    return `loadtest:injection:requested:${eventId}`;
+  }
+  private injectedCountKey(eventId: number): string {
+    return `loadtest:injection:injected:${eventId}`;
   }
 
   // 리셋 시 가상 유저만 골라 지우기 위한 접두사 — 이벤트별로 스코프한다
@@ -196,6 +210,11 @@ export class LoadTestService {
       DEFAULT_STOCK,
     );
 
+    await this.redis.incrby(
+      this.requestedInjectionKey(event.id),
+      virtualUserCount,
+    );
+
     // 컨트롤러 응답을 기다리게 하지 않는다(fire-and-forget, demo.service.ts와
     // 같은 이유) — 실패는 로그로만 남긴다.
     void this.runInjectionBatches(event.id, virtualUserCount).catch((e) => {
@@ -215,6 +234,7 @@ export class LoadTestService {
       await Promise.all(
         Array.from({ length: batchSize }, () => this.injectVirtualUser(eventId)),
       );
+      await this.redis.incrby(this.injectedCountKey(eventId), batchSize);
       remaining -= batchSize;
       if (remaining > 0) {
         await new Promise((resolve) =>
@@ -334,6 +354,8 @@ export class LoadTestService {
     await this.redis.set(`soldout:event:${event.id}`, 0);
     await this.redis.set(`abandoned:event:${event.id}`, 0);
     await this.redis.set(`system-error:event:${event.id}`, 0);
+    await this.redis.set(this.requestedInjectionKey(event.id), 0);
+    await this.redis.set(this.injectedCountKey(event.id), 0);
     // 리셋 전에 대기열에 남아있던 사람도 함께 비운다(demo.service.ts와 같은 이유).
     await this.queueService.purge(event.id);
 
@@ -369,8 +391,20 @@ export class LoadTestService {
   }
 
   private async getStats(eventId: number): Promise<LoadTestStats> {
-    const [inventory, remaining, statusSums, waiting, active, paymentCounts, soldOut, abandoned, systemError, queued] =
-      await Promise.all([
+    const [
+      inventory,
+      remaining,
+      statusSums,
+      waiting,
+      active,
+      paymentCounts,
+      soldOut,
+      abandoned,
+      systemError,
+      queued,
+      requestedInjection,
+      injectedCount,
+    ] = await Promise.all([
         this.prisma.inventory.findUnique({
           where: { eventId },
           select: { totalQty: true },
@@ -392,6 +426,8 @@ export class LoadTestService {
         this.redis.get(`abandoned:event:${eventId}`),
         this.redis.get(`system-error:event:${eventId}`),
         this.queueService.size(eventId),
+        this.redis.get(this.requestedInjectionKey(eventId)),
+        this.redis.get(this.injectedCountKey(eventId)),
         // ⚠️ ReconcileProcessor(ADR 0021)가 "최근 예약 활동이 없으면" 하루
         // 한 번짜리 완화 모드로 빠진다 — 원래는 아무도 안 보는 유휴 시간의
         // Neon 비용을 아끼려는 취지였는데, 대용량 테스트는 정반대로 "사람이
@@ -428,6 +464,10 @@ export class LoadTestService {
       abandonedCount: Number(abandoned ?? 0),
       systemErrorCount: Number(systemError ?? 0),
       admissionQueueCount: queued,
+      pendingInjectionCount: Math.max(
+        0,
+        Number(requestedInjection ?? 0) - Number(injectedCount ?? 0),
+      ),
     };
   }
 
