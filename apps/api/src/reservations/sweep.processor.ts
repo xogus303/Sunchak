@@ -37,6 +37,11 @@ interface ExpiredRow {
  *   결제 큐(payment/confirm)가 아무리 밀려도 언젠가는 스스로 PAID→CONFIRMED나
  *   FAILED→CANCELLED로 확정짓게 맡긴다 — 대신 "결제 job 자체가 영영 안 끝나는"
  *   진짜 장애만 잡는 훨씬 관대한 PAYMENT_ATTEMPT_FALLBACK_MS(5분)를 별도로 둔다.
+ * - ⚠️ `updatedAt` 수동 갱신(2026-09-09) — raw SQL(`$queryRaw`)은 Prisma
+ *   Client의 자동 `@updatedAt` 관리를 안 거친다. 처음 이 워커를 만들 때부터
+ *   빠져있던 것을 payment.processor.ts의 같은 버그를 고치며 뒤늦게 발견 —
+ *   비즈니스 로직에 영향은 없지만(이 필드를 읽는 코드가 없었음) 관측용
+ *   타임스탬프가 항상 생성 시각에 멈춰있었다.
  */
 @Processor(SWEEP_QUEUE)
 export class SweepProcessor extends WorkerHost implements OnModuleInit {
@@ -82,7 +87,7 @@ export class SweepProcessor extends WorkerHost implements OnModuleInit {
     const paymentFallbackThreshold = new Date(Date.now() - PAYMENT_ATTEMPT_FALLBACK_MS);
     const expired = await this.prisma.$queryRaw<ExpiredRow[]>`
       UPDATE reservations
-      SET status = 'EXPIRED'
+      SET status = 'EXPIRED', "updatedAt" = now()
       WHERE status = 'HELD' AND (
         (
           "heldUntil" < now()

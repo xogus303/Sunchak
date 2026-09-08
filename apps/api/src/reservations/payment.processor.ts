@@ -45,6 +45,16 @@ interface PayJobData {
  *   한 문장(성공: UPDATE...FROM...RETURNING, 실패: CTE로 묶은 이중 UPDATE)으로
  *   합쳐 왕복을 1번으로 줄인다(sweep.processor.ts와 같은 패턴 — Prisma의
  *   updateMany는 RETURNING을 지원하지 않아 원시 SQL이 필요).
+ *
+ *   ⚠️ 버그였다가 수정(2026-09-09) — `$queryRaw`는 Prisma Client의 자동
+ *   `@updatedAt` 갱신을 안 거친다(그건 `prisma.model.update()` 같은 클라이언트
+ *   API에서만 동작하는 기능). 위 최적화로 바꾸며 이걸 놓쳐서, `updatedAt`이
+ *   실제 처리 시각이 아니라 row 생성 시각에 영원히 멈춰있는 버그가 생겼다 —
+ *   실제 서비스 동작(재고·정합성)엔 영향 없지만(이 필드를 읽는 비즈니스
+ *   로직 없음), 관측/디버깅용 타임스탬프를 신뢰할 수 없게 만들었다. 실제로
+ *   이 버그 때문에 "결제가 즉시 처리된다"는 잘못된 진단을 한 번 내린 뒤,
+ *   사용자의 브라우저 캡처(실측 40초+)와 안 맞아 뒤늦게 발견했다 — 이제
+ *   두 raw SQL 모두 `"updatedAt" = now()`를 명시적으로 같이 갱신한다.
  */
 @Processor(PAYMENT_QUEUE, { concurrency: 20 })
 export class PaymentProcessor extends WorkerHost {
@@ -69,7 +79,8 @@ export class PaymentProcessor extends WorkerHost {
       // 같은 행을 두고 경합해도 둘 중 하나만 이긴다(WHERE 조건 자체가 방어선).
       const [row] = await this.prisma.$queryRaw<{ wasHeld: boolean }[]>`
         UPDATE payments
-        SET status = CASE WHEN r.status = 'HELD' THEN 'PAID'::"PaymentStatus" ELSE 'FAILED'::"PaymentStatus" END
+        SET status = CASE WHEN r.status = 'HELD' THEN 'PAID'::"PaymentStatus" ELSE 'FAILED'::"PaymentStatus" END,
+          "updatedAt" = now()
         FROM reservations r
         WHERE payments.id = ${paymentId} AND payments."reservationId" = r.id
         RETURNING (r.status = 'HELD') AS "wasHeld"
@@ -92,12 +103,12 @@ export class PaymentProcessor extends WorkerHost {
     >`
       WITH cancelled AS (
         UPDATE reservations
-        SET status = 'CANCELLED'
+        SET status = 'CANCELLED', "updatedAt" = now()
         WHERE id = ${reservationId} AND status = 'HELD'
         RETURNING "eventId", quantity
       )
       UPDATE payments
-      SET status = 'FAILED'
+      SET status = 'FAILED', "updatedAt" = now()
       WHERE id = ${paymentId}
       RETURNING
         (SELECT "eventId" FROM cancelled) AS "eventId",
