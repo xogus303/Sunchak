@@ -5,7 +5,9 @@
 > - **세션 시작 시**: 이 파일을 가장 먼저 읽고 "다음 할 일"부터 이어간다.
 > - **세션 끝 / 커밋 전**: 이 파일을 **덮어써서** 최신 상태로 갱신한다. (시간순 이력·삽질은 `DEVLOG.md`, 결정 근거는 `decisions/`)
 
-**마지막 업데이트:** 2026-09-08 (**push + CI/CD 배포 확인 + SSH 권한 설정 + 배포 VM 포기 확률 값 수동 반영 — 남은 건 3,000 VU 실서버 재검증뿐** — 커밋 `0e9bb2b`(concurrency/백프레셔/sweep 이단계 + 결제 우선순위 철회/처리량 개선/burst 윈도우 분리 전부 포함) push → CI/CD 자동 배포 성공 확인(`docker logs sunchak-api` 무에러). 사용자가 `.claude/settings.json`에 SSH 허용 규칙을 직접 추가해 지난 세션 내내 막혀있던 auto mode SSH 차단이 풀림 — 에이전트가 이제 VM에 직접 SSH 가능. 이 권한으로 VM의 `~/sunchak/api.env`를 확인해보니 `DEMO_SIM_ABANDON_PROBABILITY=0.2`가 명시돼 있어 코드 기본값(0.08)만으론 안 먹히고 있었음(예상대로) — 사용자 확인 후 백업+`sed`로 0.08 수정 + `sunchak-api` 컨테이너 재생성, `printenv`로 반영 확인. `LOAD_TEST_PAYMENT_BURST_WINDOW_MS` 등 나머지 신규 env는 VM에 별도 설정이 없어 코드 기본값이 자동 적용됨. **다음 세션(또는 준비되는 대로) 재고 5,000·VU 3,000 재현 → SSH로 divergence 직접 확인이 마지막 남은 작업.** 자세한 내용은 `docs/DEVLOG.md` 2026-09-08 항목 참고. 이전(2026-09-05, 우선순위 철회) 요약은 아래 유지)
+**마지막 업데이트:** 2026-09-08 (같은 날, 이어서) (**재검증 결과 divergence 0 확인 + "burst 윈도우가 너무 작다" 신규 버그 실측 발견·수정(3초→15초, 아직 push 안 함)** — 사용자가 배포 사이트에서 재고 10,000·VU 5,000 재현 후 처리속도 향상은 체감했지만 ①본인 결제 완료까지 여전히 5~10초 지연 ②"입장 대기 중"이 쫙 줄었다 멈추고 반복되는 패턴을 관찰·보고, "직접 실시간으로 처리량을 관측할 수 없냐"고 요청. 에이전트가 새 부하 없이 기존 DB 기록만으로 SSH 분석: **divergence 정확히 0 확인**(`CONFIRMED=3,679`=`PAID=3,679`) — sweep 이단계화 완전 검증. burst-then-pause 패턴은 `reservation.createdAt` 히스토그램 분석으로 원인 확인 — 전체 시간의 30%가 admission 완전 정지 상태였고, 원인은 `paymentBurstWindowMs`(Little's Law의 W)가 "결제 job 처리 시간"(3초)만 반영하고 "사람이 결제 버튼 누르기까지의 랜덤 지연"(0.5~10초)을 안 봐서였음. 사용자와 Little's Law·maxInFlight의 의미를 식당 비유로 짚어가며 확인 문답(사용자가 정확히 이해·응용 질문에도 올바르게 답변) 후, 배포 사이트 실측(HELD 체류 시간 p90=14.9초)으로 3초→15초 재조정(ADR 0023 개정 이력). **테스트**: 기본값 변경만이라 회귀 없음, API 147개 그린·tsc 클린. 자세한 내용은 `docs/DEVLOG.md` 2026-09-08(두 번째 항목)·ADR 0023 개정 이력 참고. 이전(push+배포+SSH+env 반영) 요약은 아래 유지)
+
+**이전 업데이트 (2026-09-08, push+배포+SSH 권한+env 반영):** (**push + CI/CD 배포 확인 + SSH 권한 설정 + 배포 VM 포기 확률 값 수동 반영 — 남은 건 3,000 VU 실서버 재검증뿐** — 커밋 `0e9bb2b`(concurrency/백프레셔/sweep 이단계 + 결제 우선순위 철회/처리량 개선/burst 윈도우 분리 전부 포함) push → CI/CD 자동 배포 성공 확인(`docker logs sunchak-api` 무에러). 사용자가 `.claude/settings.json`에 SSH 허용 규칙을 직접 추가해 지난 세션 내내 막혀있던 auto mode SSH 차단이 풀림 — 에이전트가 이제 VM에 직접 SSH 가능. 이 권한으로 VM의 `~/sunchak/api.env`를 확인해보니 `DEMO_SIM_ABANDON_PROBABILITY=0.2`가 명시돼 있어 코드 기본값(0.08)만으론 안 먹히고 있었음(예상대로) — 사용자 확인 후 백업+`sed`로 0.08 수정 + `sunchak-api` 컨테이너 재생성, `printenv`로 반영 확인. `LOAD_TEST_PAYMENT_BURST_WINDOW_MS` 등 나머지 신규 env는 VM에 별도 설정이 없어 코드 기본값이 자동 적용됨. **다음 세션(또는 준비되는 대로) 재고 5,000·VU 3,000 재현 → SSH로 divergence 직접 확인이 마지막 남은 작업.** 자세한 내용은 `docs/DEVLOG.md` 2026-09-08 항목 참고. 이전(2026-09-05, 우선순위 철회) 요약은 아래 유지)
 
 **이전 업데이트 (2026-09-05, 우선순위 철회 → 근본 해결):** (**결제 우선순위 철회 → job당 DB 왕복 축소(처리량 2배) + 백프레셔 burst 윈도우 분리(아직 push 안 함)** — 바로 아래 항목(결제 큐 우선순위)을 사용자가 반박: "내 결제만 안 느리게 만든 것뿐, 결제 시스템 처리 속도 자체가 느려선 안 된다"는 원칙은 안 풀렸다는 지적. 재조사 결과 진짜 병목은 `payment.processor.ts`가 job 하나당 Neon에 순차 2~3회 왕복(왕복당 약 100ms)하는 것 — 우선순위 코드를 전부 철회(ADR 0018에 "철회" 절로 기록)하고 대신 ①성공/실패 분기 각각을 raw SQL 한 문장으로 합쳐 왕복을 2~3회→1회로 줄임(이론상 처리량 2배, 초당 약 70→140건) ②`load-test-admission.processor.ts`의 `maxInFlight` 계산이 "입장 허가창"(사람 반응 속도, 30초)과 "동시 결제 허용치"(뒷단 처리 능력)를 같은 숫자로 섞어 쓰던 걸 분리 — 신규 `LOAD_TEST_PAYMENT_BURST_WINDOW_MS`(기본 3초)로 `maxInFlight`를 1,800→180으로 축소, 넘치는 인원은 결제 단계가 아니라 입장 대기열에서 기다리게 함(ADR 0023에 개정 이력). **테스트**: 우선순위 테스트 2건 제거, burst 윈도우 분리 확인 1건 추가 — **API 148→147 그린**, tsc 클린. **SSH 권한 요청은 미해결**(update-config 스킬 호출 자체도 auto mode 분류기가 차단 — 사용자가 직접 설정 필요). 자세한 내용은 `docs/DEVLOG.md` 2026-09-05(두 번째 항목)·ADR 0018/0023 개정 이력 참고. 이전(우선순위 도입 시점) 요약은 아래 유지)
 
@@ -267,7 +269,8 @@
   - **잡일 2건 같이 처리**: ① `/events` 판매중 카드에 `cursor-pointer` 추가(버튼 기본 커서가 `pointer`가 아니라 호버해도 클릭 가능해 보이지 않던 문제, 빌드 CSS 산출물로 확인). ② 백로그의 "`simulateLoad()` 쿨다운이 이벤트 확인보다 먼저 걸리는 문제"는 재확인 결과 이미 해소된 stale 이슈로 판명(2026-08-07 유저별 격리 작업에서 `findOrCreateOwnDemoEvent()`가 이벤트를 자동 생성하도록 바뀌어 애초에 404가 안 남) — 코드 변경 없이 정리. npm 보안 검토 자동화 백로그 항목은 사용자 요청으로 제거.
 
 ## 🔨 진행 중 / 막힌 것
-- **sweep 이단계화(ADR 0023 후속) + 결제 job당 DB 왕복 축소·백프레셔 burst 윈도우 분리 실서버 재검증 대기 중** — 코드·단위테스트·push·배포 전부 완료(2026-09-08 CI/CD 배포 확인). 실서버에서 divergence가 0에 수렴하는지, 처리량이 실제로 2배 가까이 올랐는지, 우선순위 없이도 본인 결제 체감이 충분히 빠른지는 아직 재검증 전. 막힌 건 아니고 다음 세션(또는 사용자가 준비되는 대로)에 진행. 아래 "다음 할 일" 12번 참고.
+- ✅ ~~sweep 이단계화 divergence 재검증~~ — 2026-09-08 실서버 재현+SSH 직접 대조로 **0 확인 완료**(자세한 수치는 위 요약 참고).
+- **burst 윈도우 재조정(3초→15초, 2026-09-08) 실서버 재검증 대기 중** — 코드·단위테스트 완료(147개 그린), **아직 push 안 함**. admission이 더 이상 통째로 안 멈추는지, 실측 처리량이 이론상 2배(약 140/초)에 가까운지, 본인 결제 체감(5~10초 지연)이 줄었는지 아직 미확인. 막힌 건 아니고 다음 세션(또는 사용자가 준비되는 대로)에 진행. 아래 "다음 할 일" 14번 참고.
 - ✅ ~~배포 VM `api.env`의 `DEMO_SIM_ABANDON_PROBABILITY` 수동 갱신~~ — 2026-09-08 SSH로 0.2→0.08 수정 + `sunchak-api` 재시작, 컨테이너 내부 `printenv`로 반영 확인 완료.
 - ✅ ~~SSH 권한을 auto mode에서 못 씀~~ — 2026-09-08 사용자가 `.claude/settings.json`에 `Bash(ssh -i ~/Desktop/aws/sunchak-key.pem ubuntu@15.164.234.208 *)` 허용 규칙 추가, 이후 에이전트가 VM에 정상 SSH 가능 확인.
 - (그 외 막힌 것 없음.)
@@ -298,36 +301,36 @@
 9. ✅ ~~job당 DB 왕복 축소(payment.processor.ts, 이론상 처리량 2배) + 백프레셔 burst 윈도우 분리(ADR 0023 개정, LOAD_TEST_PAYMENT_BURST_WINDOW_MS 신규)~~(2026-09-05, 구현·단위테스트 147개 그린·tsc 클린 → **커밋 [0e9bb2b] push + CI/CD 배포 완료(2026-09-08, `docker logs` 무에러 확인)**). 상세는 `docs/DEVLOG.md` 2026-09-05(두 번째 항목) 참고.
 10. ✅ ~~SSH 권한 설정(사용자가 `.claude/settings.json`에 `Bash(ssh -i ~/Desktop/aws/sunchak-key.pem ubuntu@15.164.234.208 *)` 규칙 추가)~~(2026-09-08) — 이제 에이전트가 VM에 직접 SSH 가능.
 11. ✅ ~~배포 VM `api.env`의 `DEMO_SIM_ABANDON_PROBABILITY` 0.2→0.08 수정 + `sunchak-api` 재시작~~(2026-09-08, SSH로 직접 확인·적용 — 원본은 타임스탬프 백업, 컨테이너 내부 `printenv`로 0.08 반영·무에러 기동 확인).
-12. **최우선(진행 중)** — sweep 이단계화(74건 divergence) + 9번(처리량 개선·burst 분리) 둘 다 **실서버 재검증은 아직 안 함**:
-   1. 배포 사이트(`/load-test`)에서 재고 5,000·VU 3,000(또는 더 큰 규모)으로 재현 — 이번엔 ①본인 결제가 즉시 처리되는지(우선순위 없이 burst 제한만으로 충분한지) ②실측 처리량이 실제로 2배 가까이 올랐는지도 같이 확인
-   2. 수치 변화가 멎을 때까지 대기 후, 아래 SSH 스크립트(읽기 전용 SELECT)로 해당 이벤트의 `Payment` PAID 건수와 `Reservation` CONFIRMED 건수를 직접 대조 — divergence가 0(또는 안전망 케이스만)인지 확인(이제 에이전트가 SSH로 직접 실행 가능):
-      ```bash
-      ssh -i ~/Desktop/aws/sunchak-key.pem ubuntu@15.164.234.208 bash -s <<'EOF'
-      cat > /tmp/check-divergence.js <<'JS'
-      const { PrismaClient } = require('@prisma/client');
-      const p = new PrismaClient();
-      (async () => {
-        const rows = await p.$queryRawUnsafe(`
-          SELECT e.id AS event_id,
-            (SELECT count(*) FROM reservations r WHERE r."eventId" = e.id AND r.status = 'CONFIRMED') AS reservation_confirmed,
-            (SELECT count(*) FROM payments pay JOIN reservations r2 ON pay."reservationId" = r2.id WHERE r2."eventId" = e.id AND pay.status = 'PAID') AS payment_paid,
-            (SELECT count(*) FROM reservations r3 WHERE r3."eventId" = e.id) AS total_reservations
-          FROM events e
-          WHERE e."loadTestOwnerId" IS NOT NULL
-          ORDER BY e."createdAt" DESC
-          LIMIT 1
-        `);
-        console.log(JSON.stringify(rows, null, 2));
-        await p.$disconnect();
-      })();
-      JS
-      docker cp /tmp/check-divergence.js sunchak-api:/tmp/check-divergence.js
-      docker exec sunchak-api node /tmp/check-divergence.js
-      EOF
-      ```
-   3. 결과를 `docs/DEVLOG.md` 2026-09-05 항목 끝에 추가 기록 + 이 STATUS.md 갱신
-13. (선택) ADR 0016 백로그 — Grafana에 "Neon 예산 잔량" 패널 추가. 예산 게이트 자체는 스킵하기로 했지만 콘솔을 수동으로 안 보고도 확인하고 싶으면 고려. 필수 아님.
-14. (선택, 백로그로 미뤄둠) VU/재고 상한(현재 1만) 상향 — 백프레셔 도입이 전제조건이었고 이제 갖춰졌으므로 검토 가능(ADR 0023 참고, 2026-09-01 사용자와 합의해 이번 범위에서는 보류).
+12. ✅ ~~sweep 이단계화(74건 divergence) 실서버 재검증~~(2026-09-08, 사용자가 재고 10,000·VU 5,000 재현 → 에이전트가 SSH로 직접 DB 대조) — **divergence 정확히 0 확인**(`Reservation CONFIRMED=3,679`=`Payment PAID=3,679`, `CANCELLED=914`=`FAILED=914`). sweep 이단계화가 실전에서 완전히 검증됨.
+13. ✅ ~~"burst-then-pause"(입장 대기가 쫙 줄었다 멈추는 패턴) 신규 버그 발견·수정~~(2026-09-08) — 위 재검증 중 사용자가 관찰·질문, 에이전트가 기존 DB 기록으로 원인 진단(추가 부하 없이): `paymentBurstWindowMs`(W)가 "결제 job 처리 시간"(3초)만 반영하고 "사람이 결제 버튼 누르기까지의 랜덤 지연"(0.5~10초)을 안 봐서, 테스트 시간의 30%가 admission 완전 정지 상태였음. 배포 사이트 실측(HELD 체류 시간 p90=14.9초)으로 3초→15초 재조정(ADR 0023 개정 이력). **API 147개 그린, tsc 클린 — 아직 push 안 함.**
+14. **최우선(진행 중)** — 13번 push → CI/CD 배포 확인 → 재검증(admission이 더 이상 통째로 멈추지 않는지, 실측 처리량이 이론상 2배에 가까운지, 본인 결제 체감이 5~10초보다 줄었는지):
+   ```bash
+   ssh -i ~/Desktop/aws/sunchak-key.pem ubuntu@15.164.234.208 bash -s <<'EOF'
+   cat > /tmp/check-divergence.js <<'JS'
+   const { PrismaClient } = require('@prisma/client');
+   const p = new PrismaClient();
+   (async () => {
+     const rows = await p.$queryRawUnsafe(`
+       SELECT e.id AS event_id,
+         (SELECT count(*) FROM reservations r WHERE r."eventId" = e.id AND r.status = 'CONFIRMED') AS reservation_confirmed,
+         (SELECT count(*) FROM payments pay JOIN reservations r2 ON pay."reservationId" = r2.id WHERE r2."eventId" = e.id AND pay.status = 'PAID') AS payment_paid,
+         (SELECT count(*) FROM reservations r3 WHERE r3."eventId" = e.id) AS total_reservations
+       FROM events e
+       WHERE e."loadTestOwnerId" IS NOT NULL
+       ORDER BY e."createdAt" DESC
+       LIMIT 1
+     `);
+     console.log(JSON.stringify(rows, null, 2));
+     await p.$disconnect();
+   })();
+   JS
+   docker cp /tmp/check-divergence.js sunchak-api:/tmp/check-divergence.js
+   docker exec sunchak-api node /tmp/check-divergence.js
+   EOF
+   ```
+   결과를 `docs/DEVLOG.md` 2026-09-08 항목 끝에 추가 기록 + 이 STATUS.md 갱신.
+15. (선택) ADR 0016 백로그 — Grafana에 "Neon 예산 잔량" 패널 추가. 예산 게이트 자체는 스킵하기로 했지만 콘솔을 수동으로 안 보고도 확인하고 싶으면 고려. 필수 아님.
+16. (선택, 백로그로 미뤄둠) VU/재고 상한(현재 1만) 상향 — 백프레셔 도입이 전제조건이었고 이제 갖춰졌으므로 검토 가능(ADR 0023 참고, 2026-09-01 사용자와 합의해 이번 범위에서는 보류).
 
 ## 🚀 배포 VM 정보 (AWS EC2, 2026-08-19 발급)
 - **리전**: 아시아 태평양(서울) `ap-northeast-2`. (처음 버지니아로 잘못 만들었다가 재생성 — 리전 간 인스턴스 이동 불가, AMI·키 페어·보안 그룹 전부 리전별 별개라는 점 확인함.)
