@@ -1,20 +1,18 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigModule } from '@nestjs/config';
 import { getQueueToken } from '@nestjs/bullmq';
-import { ConflictException, ForbiddenException } from '@nestjs/common';
+import { ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { PaymentStatus } from '@prisma/client';
 import { PaymentsService } from './payments.service';
-import { ReservationsService } from './reservations.service';
-import { ReservationEventsService } from './reservation-events.service';
 import { PrismaService } from '../prisma/prisma.service';
-import { RedisService } from '../redis/redis.service';
 import { PAYMENT_QUEUE } from './reservations.constants';
 
 // 결제 요청 접수(PaymentsService)는 '실제' DB의 reservationId unique 제약이
 // 재전송 방어의 핵심이라 mock으로는 검증이 무의미하다 — 통합 테스트로 짠다.
-// ReservationsService는 큐 의존성이 없어(ADR 0018로 confirm 큐 주입이 빠짐)
-// mock 없이 실제 인스턴스를 그대로 쓴다(assertOwned 재사용 검증까지 겸함).
+// raw SQL 단일 왕복 전환(2026-09-09)으로 ReservationsService(assertOwned)
+// 의존이 없어져 provider 목록에서도 뺐다 — 소유권·상태 확인이 이제 pay()
+// 자체의 쿼리에 들어있다.
 describe('PaymentsService (통합 — 결제 접수, ADR 0018)', () => {
   let moduleRef: TestingModule;
   let service: PaymentsService;
@@ -32,10 +30,7 @@ describe('PaymentsService (통합 — 결제 접수, ADR 0018)', () => {
       imports: [ConfigModule.forRoot({ isGlobal: true })],
       providers: [
         PaymentsService,
-        ReservationsService,
-        ReservationEventsService,
         PrismaService,
-        RedisService,
         { provide: getQueueToken(PAYMENT_QUEUE), useValue: paymentQueueMock },
       ],
     }).compile();
@@ -101,6 +96,13 @@ describe('PaymentsService (통합 — 결제 접수, ADR 0018)', () => {
       paymentId: payment.id,
       reservationId: reservation.id,
     });
+  });
+
+  it('존재하지 않는 예매에는 결제할 수 없다', async () => {
+    await expect(
+      service.pay(999_999, userId, randomUUID()),
+    ).rejects.toBeInstanceOf(NotFoundException);
+    expect(paymentQueueMock.add).not.toHaveBeenCalled();
   });
 
   it('본인 예매가 아니면 결제를 거부한다', async () => {
